@@ -1,42 +1,133 @@
+import socket
 import threading
 import time
-import socket
-from core.protocol import serialize, MSG_HELLO
+import json
+import os
+from core.protocol import MSG_HELLO, serialize, deserialize
 
-class DiscoveryService:
-    def __init__(self, node, port_range=range(6000, 6010)):
+# Security: File to store trusted peer identities (TOFU)
+KNOWN_HOSTS_FILE = "known_hosts.json"
+DISCOVERY_PORT = 5000  # Standard UDP port for all OnionNet nodes
+
+class DiscoveryService(threading.Thread):
+    def __init__(self, node):
+        super().__init__()
         self.node = node
-        self.port_range = port_range
         self.running = True
+        
+        # Load known hosts for TOFU validation
+        self.known_hosts = self._load_known_hosts()
 
-    def start(self):
-        threading.Thread(target=self._scan_loop, daemon=True).start()
+    def _load_known_hosts(self):
+        """Load trusted peers from disk."""
+        if os.path.exists(KNOWN_HOSTS_FILE):
+            try:
+                with open(KNOWN_HOSTS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
 
-    def manual_connect(self, host, port):
-        threading.Thread(target=self._ping, args=(host, int(port)), daemon=True).start()
-
-    def _scan_loop(self):
-        while self.running:
-            for p in self.port_range:
-                if p == self.node.port:
-                    continue
-                self._ping('127.0.0.1', p)
-            time.sleep(10)
-
-    def _ping(self, host, target_port):
+    def _save_known_hosts(self):
+        """Save trusted peers to disk."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
-            s.connect((host, target_port))
+            with open(KNOWN_HOSTS_FILE, 'w') as f:
+                json.dump(self.known_hosts, f, indent=4)
+        except Exception as e:
+            print(f"Error saving known_hosts: {e}")
 
-            advertised_host = self.node.get_local_ip()
+    def run(self):
+        """Start the listener and the broadcaster."""
+        threading.Thread(target=self.listen_broadcasts, daemon=True).start()
+        
+        while self.running:
+            self.broadcast_presence()
+            time.sleep(5)
 
-            payload = {
-                "host": advertised_host,
-                "port": self.node.port,
-                "pub_key": self.node.pub_key
-            }
-            s.send(serialize(MSG_HELLO, payload))
+    def broadcast_presence(self):
+        """Announce our existence to the LAN via UDP."""
+        msg = {
+            "host": self.node.get_local_ip(),
+            "port": self.node.port,
+            "pub_key": self.node.pub_key.decode('utf-8')
+        }
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(serialize(MSG_HELLO, msg), ('<broadcast>', DISCOVERY_PORT))
             s.close()
         except:
             pass
+
+    def manual_connect(self, host, port):
+        """
+        Manually trigger a connection attempt.
+        Instead of connecting directly via TCP, we send a UDP HELLO.
+        This forces the handshake to go through our Secure Listener logic.
+        """
+        msg = {
+            "host": self.node.get_local_ip(),
+            "port": self.node.port,
+            "pub_key": self.node.pub_key.decode('utf-8')
+        }
+        try:
+            # We send to the standard Discovery Port (5000), not the data port.
+            # The other node is listening there.
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.sendto(serialize(MSG_HELLO, msg), (host, DISCOVERY_PORT))
+            s.close()
+        except Exception as e:
+            print(f"Manual connect failed: {e}")
+
+    def listen_broadcasts(self):
+        """Secure Listener: Validates every incoming Hello packet."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('', DISCOVERY_PORT))
+        except:
+            print("Discovery port in use. Discovery disabled.")
+            return
+
+        while self.running:
+            try:
+                data, addr = s.recvfrom(4096)
+                msg_type, payload = deserialize(data)
+                
+                if msg_type == MSG_HELLO:
+                    self._validate_and_add_peer(payload)
+            except:
+                continue
+
+    def _validate_and_add_peer(self, payload):
+        """
+        Security Logic: Trust-On-First-Use (TOFU)
+        """
+        peer_host = payload.get('host')
+        peer_port = payload.get('port')
+        peer_key = payload.get('pub_key')
+        
+        # Identity is defined by IP:Port
+        peer_id = f"{peer_host}:{peer_port}"
+
+        # 1. Ignore ourselves
+        if peer_port == self.node.port and peer_host == self.node.get_local_ip():
+            return
+
+        # 2. TOFU CHECK
+        if peer_id in self.known_hosts:
+            stored_key = self.known_hosts[peer_id]
+            
+            if stored_key != peer_key:
+                # MITM DETECTED!
+                # The IP is the same, but the Key changed. A hacker is intercepting.
+                print(f"\n[SECURITY ALERT] 🚨 MITM BLOCKED! Peer {peer_id} changed keys!")
+                return # BLOCK: Do not add to peer list.
+        else:
+            # First time seeing this peer? Trust them and save.
+            print(f"[TOFU] Trusting new peer: {peer_id}")
+            self.known_hosts[peer_id] = peer_key
+            self._save_known_hosts()
+
+        # 3. If valid, add to node
+        self.node.add_peer(payload)
