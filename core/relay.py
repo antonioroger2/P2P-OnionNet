@@ -11,10 +11,10 @@ class RelayService:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
 
-    def bind_and_listen(self, port_range):
+    def bind_and_listen(self, port_range, bind_ip='0.0.0.0'):
         for port in port_range:
             try:
-                self.sock.bind(('127.0.0.1', port))
+                self.sock.bind((bind_ip, port))
                 self.sock.listen(5)
                 return port
             except OSError:
@@ -34,7 +34,6 @@ class RelayService:
 
     def _handle(self, conn):
         try:
-            # Increased buffer size for potentially large encrypted payloads
             data = conn.recv(1024 * 64) 
             if not data: return
             
@@ -54,7 +53,6 @@ class RelayService:
                 self.node.modules['torrent'].handle_chunk(payload)
             
             elif msg_type == MSG_DIRECT:
-                # Direct response (e.g. from Proxy Exit Node back to Client)
                 mod = payload.get('module')
                 content = payload.get('content')
                 if mod in self.node.modules:
@@ -66,32 +64,20 @@ class RelayService:
             conn.close()
 
     def _process_onion(self, encrypted_data):
-        """
-        Decrypts one layer. 
-        If next_hop is None -> We are Exit Node -> Process Payload.
-        If next_hop exists -> Relay encrypted inner data to next node.
-        """
         try:
-            # 1. Decrypt using MY Private Key
             decrypted_bytes = hybrid_decrypt(encrypted_data, self.node.private_key)
             if decrypted_bytes is None:
                 print("Failed to decrypt onion layer.")
                 return
 
-            # 2. Parse the Layer (JSON)
             layer_json = json.loads(decrypted_bytes.decode('utf-8'))
-            
-            # 3. Extract Inner Data
             inner_data = base64.b64decode(layer_json['data_b64'])
             next_hop = layer_json.get('next_hop')
 
             if next_hop is None:
-                # I am the Exit Node!
-                # Inner data is the final payload
                 final_payload = json.loads(inner_data.decode('utf-8'))
                 self.node.handle_exit_traffic(final_payload)
             else:
-                # Relay to Next Hop
                 host, port = next_hop
                 self.node.send_raw(host, port, MSG_ONION, inner_data)
 

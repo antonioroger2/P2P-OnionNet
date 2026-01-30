@@ -12,24 +12,27 @@ class DiscoveryService:
     def start(self):
         threading.Thread(target=self._scan_loop, daemon=True).start()
 
+    def manual_connect(self, host, port):
+        threading.Thread(target=self._ping, args=(host, int(port)), daemon=True).start()
+
     def _scan_loop(self):
         while self.running:
-            # Broadcast HELLO to all ports in range on localhost
             for p in self.port_range:
                 if p == self.node.port:
                     continue
-                self._ping(p)
-            time.sleep(10)  # Rescan every 10s
+                self._ping('127.0.0.1', p)
+            time.sleep(10)
 
-    def _ping(self, target_port):
+    def _ping(self, host, target_port):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
-            s.connect(('127.0.0.1', target_port))
+            s.connect((host, target_port))
 
-            # Send Public Key/Identity
+            advertised_host = self.node.get_local_ip()
+
             payload = {
-                "host": '127.0.0.1',
+                "host": advertised_host,
                 "port": self.node.port,
                 "pub_key": self.node.pub_key
             }
