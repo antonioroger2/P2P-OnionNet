@@ -39,8 +39,11 @@ def render_torrent(node):
             
             # Create a download button for the user to save it to their actual PC
             if f_hash in node.modules['torrent'].chunks:
+                # Assemble chunks in order
+                chunks = node.modules['torrent'].chunks[f_hash]
+                data = b"".join(chunks[i] for i in sorted(chunks.keys()))
                 st.download_button(
                     label="Save to Disk",
-                    data=node.modules['torrent'].chunks[f_hash][0],
+                    data=data,
                     file_name=meta['name']
                 )
