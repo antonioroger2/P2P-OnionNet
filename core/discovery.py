@@ -6,7 +6,7 @@ import os
 from core.protocol import MSG_HELLO, MSG_PEX, serialize, deserialize 
 
 KNOWN_HOSTS_FILE = "known_hosts.json"
-DISCOVERY_PORT = 49153 
+DISCOVERY_PORT = 49513 
 
 class DiscoveryService(threading.Thread):
     def __init__(self, node):
@@ -43,7 +43,7 @@ class DiscoveryService(threading.Thread):
 
     def manual_connect(self, host, port=None):
         """Entry point for manual bootstrap"""
-        print(f"[PEX] Bootstrapping to {host}...")
+        print(f"[DEBUG] Redirecting manual connect from {host}:{port} to discovery port {DISCOVERY_PORT}")
         self.send_direct_hello(host)
 
     def send_direct_hello(self, target_host, is_broadcast=False):
