@@ -2,6 +2,7 @@ import socket
 import threading
 import json
 import base64
+import struct # Required for length prefixing
 from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_CHUNK, MSG_DIRECT
 from core.crypto import hybrid_decrypt
 
@@ -11,30 +12,15 @@ class RelayService:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
 
-    def bind_and_listen(self, port_range, bind_ip='0.0.0.0'):
-        for port in port_range:
-            try:
-                self.sock.bind((bind_ip, port))
-                self.sock.listen(5)
-                return port
-            except OSError:
-                continue
-        raise RuntimeError("No free ports available.")
-
-    def start(self):
-        threading.Thread(target=self._listener, daemon=True).start()
-
-    def _listener(self):
-        while self.running:
-            try:
-                conn, addr = self.sock.accept()
-                threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
-            except:
-                break
-
     def _handle(self, conn):
         try:
-            data = conn.recv(1024 * 64) 
+            # Read 4-byte length prefix to know how much data is coming
+            raw_msglen = self.recvall(conn, 4)
+            if not raw_msglen: return
+            msglen = struct.unpack('>I', raw_msglen)[0]
+            
+            # Read the actual packet data based on length
+            data = self.recvall(conn, msglen)
             if not data: return
             
             packet = deserialize(data)
@@ -50,18 +36,22 @@ class RelayService:
                 self._process_onion(payload)
 
             elif msg_type == MSG_CHUNK:
-                self.node.modules['torrent'].handle_chunk(payload)
-            
-            elif msg_type == MSG_DIRECT:
-                mod = payload.get('module')
-                content = payload.get('content')
-                if mod in self.node.modules:
-                    self.node.modules[mod].receive(content)
+                # Direct chunk handling if not using onion routing
+                self.node.modules['torrent'].receive(payload)
 
         except Exception as e:
             print(f"Relay Error: {e}")
         finally:
             conn.close()
+
+    def recvall(self, sock, n):
+        """Helper to receive exactly n bytes from a socket."""
+        data = bytearray()
+        while len(data) < n:
+            packet = sock.recv(n - len(data))
+            if not packet: return None
+            data.extend(packet)
+        return data
 
     def _process_onion(self, encrypted_data):
         try:

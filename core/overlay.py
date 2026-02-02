@@ -1,4 +1,5 @@
 import socket
+import struct
 from core.relay import RelayService
 from core.discovery import DiscoveryService
 from core.circuit import CircuitManager
@@ -20,6 +21,7 @@ class OnionNode:
 
         # Initialize Sub-Systems
         self.relay = RelayService(self)
+        # Port range for node binding
         self.port = self.relay.bind_and_listen(range(6000, 6010), bind_ip=self.bind_ip)
         self.relay.start()
 
@@ -52,24 +54,28 @@ class OnionNode:
         self.peers[pid] = peer_data
 
     def send_raw(self, host, port, msg_type, payload):
-        """Low-level TCP send"""
+        """Low-level TCP send with 4-byte length prefixing to prevent fragmentation."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
+            s.settimeout(5)
             s.connect((host, port))
-            s.send(serialize(msg_type, payload))
+            
+            data = serialize(msg_type, payload)
+            # Pack length as a 4-byte unsigned integer (big-endian)
+            packed_data = struct.pack('>I', len(data)) + data
+            s.sendall(packed_data)
             s.close()
-        except:
-            pass
+        except Exception as e:
+            print(f"Send failed to {host}:{port} - {e}")
 
     def send_onion(self, destination_module, payload):
-        """Original: Sends to a RANDOM exit node"""
+        """Builds a random circuit for anonymous requests."""
         circuit = self.circuit_mgr.build_circuit()
         if not circuit: return
         self._dispatch_onion(circuit, destination_module, payload)
 
     def send_onion_to_peer(self, target_peer_id, destination_module, payload):
-        """New: Sends to a SPECIFIC peer via an onion path"""
+        """Builds a targeted circuit ending at a specific peer."""
         if target_peer_id not in self.peers: return
         
         target = self.peers[target_peer_id]
@@ -79,7 +85,6 @@ class OnionNode:
         self._dispatch_onion(circuit, destination_module, payload)
 
     def _dispatch_onion(self, circuit, destination_module, payload):
-        """Helper to wrap and send onion packet"""
         final_payload = {"module": destination_module, "payload": payload}
         onion_packet = self.circuit_mgr.wrap_onion(final_payload, circuit)
         
@@ -87,7 +92,7 @@ class OnionNode:
         self.send_raw(entry_node['host'], entry_node['port'], MSG_ONION, onion_packet)
 
     def handle_exit_traffic(self, data):
-        """Called when this node is the Exit Node"""
+        """Dispatches decrypted traffic to the correct local module."""
         module_name = data.get('module')
         content = data.get('payload')
         if module_name in self.modules:
