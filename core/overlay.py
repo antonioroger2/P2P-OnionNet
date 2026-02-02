@@ -47,6 +47,8 @@ class OnionNode:
 
     def add_peer(self, peer_data):
         pid = f"{peer_data['host']}:{peer_data['port']}"
+        if isinstance(peer_data['pub_key'], str):
+            peer_data['pub_key'] = peer_data['pub_key'].encode('utf-8')
         self.peers[pid] = peer_data
 
     def send_raw(self, host, port, msg_type, payload):

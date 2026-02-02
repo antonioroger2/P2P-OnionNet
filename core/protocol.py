@@ -5,7 +5,8 @@ import base64
 MSG_HELLO = "HELLO"         # Discovery (Key Exchange)
 MSG_ONION = "ONION_MSG"     # Routed Traffic (Encrypted)
 MSG_CHUNK = "FILE_CHUNK"    # Torrent/File (Direct P2P)
-MSG_DIRECT = "DIRECT"       # Direct Response (e.g., from Exit Node)
+MSG_DIRECT = "DIRECT"       # Direct Response (e.g., from Exit Node)  
+MSG_PEX = "PEX_LIST"        # Constant for Peer Exchange
 
 def serialize(packet_type, payload):
     """
