@@ -12,6 +12,18 @@ DISCOVERY_PORT = 5000  # Standard UDP port for all OnionNet nodes
 class DiscoveryService(threading.Thread):
     def __init__(self, node):
         super().__init__()
+        
+        # --- DEV MODE: AUTO-RESET TRUST ---
+        # This prevents "MITM Blocked" errors when restarting nodes during testing.
+        # (Since keys regenerate on every restart in this MVP).
+        if os.path.exists(KNOWN_HOSTS_FILE):
+            try:
+                os.remove(KNOWN_HOSTS_FILE)
+                print(f"[DEV MODE] Cleared {KNOWN_HOSTS_FILE} for fresh testing.")
+            except Exception as e:
+                print(f"[DEV MODE] Failed to clear known_hosts: {e}")
+        # ----------------------------------
+
         self.node = node
         self.running = True
         
