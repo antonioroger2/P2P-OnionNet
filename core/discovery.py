@@ -8,21 +8,22 @@ from core.protocol import MSG_HELLO, MSG_PEX, serialize, deserialize
 # Security: File to store trusted peer identities
 KNOWN_HOSTS_FILE = "known_hosts.json"
 
-# Automated Port Management: 
-# If one is blocked by a ghost process, the node automatically tries the other.
-PRIMARY_PORT = 49153
-FALLBACK_PORT = 49513 
-
 class DiscoveryService(threading.Thread):
     def __init__(self, node):
         super().__init__()
         self.node = node
         self.running = True
-        self.discovery_port = PRIMARY_PORT
+        self.discovery_port = 0  # Will be assigned dynamically by OS
         self.known_hosts = self._load_known_hosts()
+        
+        # DEV MODE: Auto-reset trust
+        if os.path.exists(KNOWN_HOSTS_FILE):
+            try:
+                os.remove(KNOWN_HOSTS_FILE)
+            except:
+                pass
 
     def _load_known_hosts(self):
-        """Load trusted peers from disk."""
         if os.path.exists(KNOWN_HOSTS_FILE):
             try:
                 with open(KNOWN_HOSTS_FILE, 'r') as f:
@@ -32,66 +33,48 @@ class DiscoveryService(threading.Thread):
         return {}
 
     def _save_known_hosts(self):
-        """Save trusted peers to disk."""
         try:
             with open(KNOWN_HOSTS_FILE, 'w') as f:
                 json.dump(self.known_hosts, f, indent=4)
-        except Exception as e:
-            print(f"Error saving known_hosts: {e}")
+        except:
+            pass
 
     def run(self):
-        """Start the listener and the broadcaster."""
+        """Start the listener."""
         threading.Thread(target=self.listen_broadcasts, daemon=True).start()
         
         while self.running:
-            self.broadcast_presence()
-            time.sleep(10) # Rely more on Gossip/PEX than spammy broadcasts
+            # We don't broadcast blindly anymore since ports are random.
+            # We rely on Manual Connect + PEX (Gossip).
+            time.sleep(5)
 
-    def broadcast_presence(self):
-        """Announce existence to the LAN via UDP."""
-        self.send_direct_hello('<broadcast>', is_broadcast=True)
+    def manual_connect(self, host, target_port):
+        """
+        Manually connect to a peer's specific UDP Discovery Port.
+        """
+        if not target_port:
+            print("[!] Manual connect failed: No port specified")
+            return
 
-    def manual_connect(self, host, port=None):
-        """
-        Automated Handshake: Tries both potential discovery ports 
-        to ensure the connection works even if a ghost process exists.
-        """
-        print(f"[PEX] Attempting automated handshake with {host}...")
-        for port_to_try in [PRIMARY_PORT, FALLBACK_PORT]:
-            self._send_raw_hello(host, port_to_try)
+        print(f"[MANUAL] Pinging {host}:{target_port}...")
+        self._send_raw_hello(host, int(target_port))
 
     def _send_raw_hello(self, target_host, target_port):
-        """Internal helper to send identity packet."""
+        """Send identity packet to a specific target."""
         msg = {
             "host": self.node.get_local_ip(),
-            "port": self.node.port,
+            "port": self.node.port,         # My TCP Data Port
             "pub_key": self.node.pub_key.decode('utf-8')
         }
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(serialize(MSG_HELLO, msg), (target_host, target_port))
             s.close()
-        except:
-            pass
-
-    def send_direct_hello(self, target_host, is_broadcast=False):
-        """Sends identity to the current active discovery port."""
-        msg = {
-            "host": self.node.get_local_ip(),
-            "port": self.node.port,
-            "pub_key": self.node.pub_key.decode('utf-8')
-        }
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            if is_broadcast:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            s.sendto(serialize(MSG_HELLO, msg), (target_host, self.discovery_port))
-            s.close()
         except Exception as e:
-            print(f"UDP Error: {e}")
+            print(f"[!] Send Error: {e}")
 
-    def send_pex(self, target_host):
-        """Gossip: Send full known peer list to a target."""
+    def send_pex(self, target_host, target_port):
+        """Gossip: Send peer list to a target."""
         pex_data = []
         for pid, meta in self.node.peers.items():
             pex_data.append({
@@ -102,38 +85,33 @@ class DiscoveryService(threading.Thread):
         
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(serialize(MSG_PEX, pex_data), (target_host, self.discovery_port))
+            s.sendto(serialize(MSG_PEX, pex_data), (target_host, target_port))
             s.close()
-        except Exception as e:
-            print(f"PEX Send Error: {e}")
+        except:
+            pass
 
     def listen_broadcasts(self):
         """
-        Automated Listener with Fallback and Windows Compatibility.
+        Binds to Port 0 (OS Assigned) to avoid blocks.
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Windows Compatibility: SO_REUSEPORT is only for Unix
+        # Windows Compatibility
         if hasattr(socket, 'SO_REUSEPORT'):
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except:
                 pass
 
-        # Automatic Resource Recovery: Try primary port, then fallback
         try:
-            s.bind(('', self.discovery_port))
-        except OSError:
-            print(f"[!] Port {self.discovery_port} blocked. Trying fallback...")
-            self.discovery_port = FALLBACK_PORT
-            try:
-                s.bind(('', self.discovery_port))
-            except OSError:
-                print("[CRITICAL] All discovery ports blocked. Please restart your terminal.")
-                return
-
-        print(f"[*] Discovery Service Online: Port {self.discovery_port}")
+            # BIND TO PORT 0 -> OS picks a free random port
+            s.bind(('', 0))
+            self.discovery_port = s.getsockname()[1] # Capture the actual port
+            print(f"[*] Discovery Service Listening on UDP Port {self.discovery_port}")
+        except Exception as e:
+            print(f"[CRITICAL] Bind Failed: {e}")
+            return
 
         while self.running:
             try:
@@ -145,9 +123,11 @@ class DiscoveryService(threading.Thread):
                 
                 if msg_type == MSG_HELLO:
                     if self._validate_and_add_peer(payload):
-                        # Introduction handshake: Reply and Gossip
-                        self.send_direct_hello(addr[0])
-                        self.send_pex(addr[0])
+                        # Reply to the sender so they know us too
+                        # Note: We don't know their listening port unless they told us, 
+                        # but for UDP hole punching we often reply to addr[1].
+                        # For this strict firewall, we assume Manual Connect is 2-way.
+                        print(f"[+] Handshake from {addr}")
                 
                 elif msg_type == MSG_PEX:
                     for peer_data in payload:
@@ -157,29 +137,25 @@ class DiscoveryService(threading.Thread):
                 continue
 
     def _validate_and_add_peer(self, payload):
-        """Identity validation and immediate mesh introduction."""
         peer_host = payload.get('host')
         peer_port = payload.get('port')
         peer_key = payload.get('pub_key')
         peer_id = f"{peer_host}:{peer_port}"
 
-        # 1. Ignore ourselves
         if peer_port == self.node.port and peer_host == self.node.get_local_ip():
             return False
 
-        # 2. TOFU/Identity Check
         if peer_id in self.known_hosts:
             if self.known_hosts[peer_id] != peer_key:
-                print(f"[SECURITY] MITM BLOCKED: {peer_id}")
+                print(f"[SECURITY] BLOCKED MITM: {peer_id}")
                 return False
         else:
             self.known_hosts[peer_id] = peer_key
             self._save_known_hosts()
 
-        # 3. Add to node and signal if it's a new discovery
         if peer_id not in self.node.peers:
-            print(f"[PEX] New Peer Discovered: {peer_id}")
+            print(f"[NEW] Peer Linked: {peer_id}")
             self.node.add_peer(payload)
-            return True # Signal for gossip introduction
+            return True
         
         return False
