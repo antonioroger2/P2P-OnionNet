@@ -159,9 +159,20 @@ class TorrentModule:
 
                 # Save chunk
                 self.chunks.setdefault(f_hash, {})[idx] = data
+                # Inside the "chunk" action in receive()
                 if entry['needed']:
-                    entry['needed'].discard(idx)
-
+                    # Request the next chunk immediately from known peers
+                    next_idx = sorted(list(entry['needed']))[0]
+                    # You'll need to track which peer had which chunk in entry['peers']
+                    for p_id, p_indices in entry['peers'].items():
+                        if next_idx in p_indices:
+                            self.node.send_onion_to_peer(p_id, "torrent", {
+                                "action": "get_chunk",
+                                "hash": f_hash,
+                                "index": next_idx,
+                                "origin_fp": self.node.pub_key.decode('utf-8')
+                            })
+                            break
                 # If we don't know total yet, try to infer from peers
                 if entry['total'] is None:
                     # If any peer previously reported total, use it (already set when we got 'have')
@@ -173,13 +184,12 @@ class TorrentModule:
                     self.files[f_hash] = {"name": f"Downloaded_{f_hash}", "size": sum(len(v) for v in self.chunks[f_hash].values()), "total": entry['total'], "owner_fp": None}
                     # No longer pending
                     del self.pending[f_hash]
-
+    
     def _find_peer_by_key(self, target_pub_key_str):
         for pid, meta in self.node.peers.items():
-            if isinstance(meta.get('pub_key'), bytes):
-                if meta.get('pub_key').decode('utf-8') == target_pub_key_str:
-                    return pid
-            else:
-                if meta.get('pub_key') == target_pub_key_str:
-                    return pid
+            current_key = meta.get('pub_key')
+            if isinstance(current_key, bytes):
+                current_key = current_key.decode('utf-8')
+            if current_key == target_pub_key_str:
+                return pid
         return None

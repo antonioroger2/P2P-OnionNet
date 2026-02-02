@@ -41,7 +41,8 @@ def render_torrent(node):
             if f_hash in node.modules['torrent'].chunks:
                 # Assemble chunks in order
                 chunks = node.modules['torrent'].chunks[f_hash]
-                data = b"".join(chunks[i] for i in sorted(chunks.keys()))
+                if len(chunks_dict) == meta['total']: # Only allow download if complete
+                    data = b"".join(chunks_dict[i] for i in range(meta['total']))
                 st.download_button(
                     label="Save to Disk",
                     data=data,
