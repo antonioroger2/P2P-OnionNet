@@ -13,7 +13,7 @@ class RelayService:
         self.running = True
 
     def bind_and_listen(self, port_range, bind_ip='0.0.0.0'):
-        """Attempts to bind the node to an available port in the specified range."""
+        """Attempts to bind the node to an available port in the range."""
         for port in port_range:
             try:
                 self.sock.bind((bind_ip, port))
@@ -21,7 +21,7 @@ class RelayService:
                 return port
             except OSError:
                 continue
-        raise RuntimeError("No free ports available in the specified range.")
+        raise RuntimeError("No free ports available.")
 
     def start(self):
         threading.Thread(target=self._listener, daemon=True).start()
@@ -36,12 +36,12 @@ class RelayService:
 
     def _handle(self, conn):
         try:
-            # 1. Read 4-byte length prefix
+            # Read 4-byte length prefix
             raw_msglen = self.recvall(conn, 4)
             if not raw_msglen: return
             msglen = struct.unpack('>I', raw_msglen)[0]
             
-            # 2. Read exact amount of data specified by prefix
+            # Read the full packet based on the prefix length
             data = self.recvall(conn, msglen)
             if not data: return
             
@@ -67,7 +67,7 @@ class RelayService:
             conn.close()
 
     def recvall(self, sock, n):
-        """Helper to receive exactly n bytes to prevent packet fragmentation."""
+        """Helper to receive exactly n bytes to prevent fragmentation."""
         data = bytearray()
         while len(data) < n:
             packet = sock.recv(n - len(data))
@@ -85,11 +85,9 @@ class RelayService:
             next_hop = layer_json.get('next_hop')
 
             if next_hop is None:
-                # We are the Exit Node
                 final_payload = json.loads(inner_data.decode('utf-8'))
                 self.node.handle_exit_traffic(final_payload)
             else:
-                # Forward to next hop
                 host, port = next_hop
                 self.node.send_raw(host, port, MSG_ONION, inner_data)
         except Exception as e:

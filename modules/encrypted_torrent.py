@@ -7,13 +7,12 @@ CHUNK_SIZE = 64 * 1024
 class TorrentModule:
     def __init__(self, node):
         self.node = node
-        self.chunks = {}  # {file_hash: {index: data}}
-        self.files = {}   # {file_hash: metadata}
-        self.pending = {} # {file_hash: {needed: set(), total: int, peers: {}}}
+        self.chunks = {}  
+        self.files = {}   
+        self.pending = {} 
         self.lock = threading.Lock()
 
     def add_file(self, filename, data):
-        """Initializes a new file for seeding."""
         f_hash = hashlib.sha256(data).hexdigest()[:16]
         total = math.ceil(len(data) / CHUNK_SIZE)
         
@@ -31,7 +30,6 @@ class TorrentModule:
         return f_hash
 
     def request_file(self, f_hash):
-        """Starts a download by querying all peers."""
         my_fp = self.node.pub_key.decode('utf-8')
         with self.lock:
             if f_hash not in self.pending:
@@ -57,11 +55,8 @@ class TorrentModule:
                 target_peer_id = self._find_peer_by_key(origin_fp)
                 if target_peer_id:
                     self.node.send_onion_to_peer(target_peer_id, "torrent", {
-                        "action": "have",
-                        "hash": req_hash,
-                        "indices": indices,
-                        "total": total,
-                        "holder_fp": my_fp
+                        "action": "have", "hash": req_hash, 
+                        "indices": indices, "total": total, "holder_fp": my_fp
                     })
 
         elif action == "have":
@@ -90,11 +85,8 @@ class TorrentModule:
                 target_peer_id = self._find_peer_by_key(origin_fp)
                 if target_peer_id:
                     self.node.send_onion_to_peer(target_peer_id, "torrent", {
-                        "action": "chunk",
-                        "hash": f_hash,
-                        "index": idx,
-                        "data": self.chunks[f_hash][idx],
-                        "holder_fp": my_fp
+                        "action": "chunk", "hash": f_hash, "index": idx,
+                        "data": self.chunks[f_hash][idx], "holder_fp": my_fp
                     })
 
         elif action == "chunk":
@@ -105,9 +97,9 @@ class TorrentModule:
             with self.lock:
                 if f_hash not in self.pending: return
                 entry = self.pending[f_hash]
-                
                 self.chunks.setdefault(f_hash, {})[idx] = data
-                # CRITICAL FIX: Mark chunk as done to progress download.
+                
+                # CRITICAL: Mark chunk as received
                 entry['needed'].discard(idx)
 
                 if not entry['needed']:
@@ -121,27 +113,20 @@ class TorrentModule:
                     self._request_next_chunk(f_hash)
 
     def _request_next_chunk(self, f_hash):
-        """Requests the next missing index from available peers."""
         entry = self.pending[f_hash]
         if not entry['needed']: return
-
         next_idx = sorted(list(entry['needed']))[0]
         for p_id, p_indices in entry['peers'].items():
             if next_idx in p_indices:
                 self.node.send_onion_to_peer(p_id, "torrent", {
-                    "action": "get_chunk",
-                    "hash": f_hash,
-                    "index": next_idx,
-                    "origin_fp": self.node.pub_key.decode('utf-8')
+                    "action": "get_chunk", "hash": f_hash, 
+                    "index": next_idx, "origin_fp": self.node.pub_key.decode('utf-8')
                 })
                 break
 
     def _find_peer_by_key(self, target_pub_key_str):
-        """Robust identity matching for onion routing."""
         for pid, meta in self.node.peers.items():
             p_key = meta.get('pub_key')
-            if isinstance(p_key, bytes):
-                p_key = p_key.decode('utf-8')
-            if p_key == target_pub_key_str:
-                return pid
+            if isinstance(p_key, bytes): p_key = p_key.decode('utf-8')
+            if p_key == target_pub_key_str: return pid
         return None

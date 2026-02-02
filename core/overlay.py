@@ -14,14 +14,10 @@ from modules.http_proxy import ProxyModule
 class OnionNode:
     def __init__(self, bind_ip='0.0.0.0'):
         self.bind_ip = bind_ip
-        
-        # Identity
         self.private_key, self.pub_key = generate_rsa_keypair()
         self.peers = {} 
 
-        # Initialize Sub-Systems
         self.relay = RelayService(self)
-        # Fix for AttributeError: calling bind_and_listen
         self.port = self.relay.bind_and_listen(range(6000, 6010), bind_ip=self.bind_ip)
         self.relay.start()
 
@@ -29,7 +25,6 @@ class OnionNode:
         self.discovery.start()
         self.circuit_mgr = CircuitManager(self)
 
-        # Modules
         self.modules = {
             "chat": ChatModule(self),
             "torrent": TorrentModule(self),
@@ -37,21 +32,19 @@ class OnionNode:
         }
 
     def send_raw(self, host, port, msg_type, payload):
-        """Low-level TCP send with length prefixing to handle large payloads."""
+        """TCP send with length prefixing."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(5)
             s.connect((host, port))
             
             data = serialize(msg_type, payload)
-            # Prefix with 4-byte network-order length
             packed_data = struct.pack('>I', len(data)) + data
             s.sendall(packed_data)
             s.close()
         except Exception as e:
-            print(f"Send failed to {host}:{port} - {e}")
+            print(f"Send failed: {e}")
 
-    # ... (Rest of OnionNode methods remain the same as your current overlay.py)
     def add_peer(self, peer_data):
         pid = f"{peer_data['host']}:{peer_data['port']}"
         if isinstance(peer_data['pub_key'], str):
