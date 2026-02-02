@@ -37,14 +37,20 @@ def render_torrent(node):
             st.caption(f"Hash: {f_hash}")
             st.caption(f"Size: {meta['size']} bytes")
             
-            # Create a download button for the user to save it to their actual PC
+            # Fix: Define chunks_dict by accessing the module's chunk storage
             if f_hash in node.modules['torrent'].chunks:
-                # Assemble chunks in order
-                chunks = node.modules['torrent'].chunks[f_hash]
-                if len(chunks_dict) == meta['total']: # Only allow download if complete
-                    data = b"".join(chunks_dict[i] for i in range(meta['total']))
-                st.download_button(
-                    label="Save to Disk",
-                    data=data,
-                    file_name=meta['name']
-                )
+                chunks_dict = node.modules['torrent'].chunks[f_hash]
+                
+                # Only allow saving to disk if we have all the parts
+                if len(chunks_dict) == meta['total']: 
+                    # Assemble chunks in order
+                    data = b"".join(chunks_dict[i] for i in sorted(chunks_dict.keys()))
+                    st.download_button(
+                        label="Save to Disk",
+                        data=data,
+                        file_name=meta['name']
+                    )
+                else:
+                    progress = len(chunks_dict) / meta['total']
+                    st.progress(progress)
+                    st.caption(f"Downloading... {len(chunks_dict)}/{meta['total']} chunks")
