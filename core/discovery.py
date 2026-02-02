@@ -73,7 +73,7 @@ class DiscoveryService(threading.Thread):
 
     def manual_connect(self, host, port):
         """
-        Fixed: Sends a UDP HELLO to the target's Discovery Port (5000).
+        Sends a UDP HELLO to the target's Discovery Port (5000).
         """
         msg = {
             "host": self.node.get_local_ip(),
@@ -82,11 +82,15 @@ class DiscoveryService(threading.Thread):
         }
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Ensure the socket can send broadcast if needed, though direct is preferred here
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Send directly to the discovery port of the target host
             s.sendto(serialize(MSG_HELLO, msg), (host, DISCOVERY_PORT))
             s.close()
+            print(f"[DEBUG] Manual HELLO sent to {host}:{DISCOVERY_PORT}")
         except Exception as e:
             print(f"Manual connect failed: {e}")
-
+            
     def listen_broadcasts(self):
         """
         Fixed: Properly unpacks the (type, payload) tuple and allows local testing.
