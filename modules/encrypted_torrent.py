@@ -1,6 +1,7 @@
 import hashlib
 import math
 import threading
+import base64
 
 CHUNK_SIZE = 64 * 1024
 
@@ -9,11 +10,11 @@ class TorrentModule:
         self.node = node
         self.chunks = {}  # {file_hash: {index: data}}
         self.files = {}   # {file_hash: metadata}
-        self.pending = {} # {file_hash: {needed: set(), total: int, peers: {}}}
+        self.pending = {} # {file_hash: {needed: set, total: int, peers: {}}}
         self.lock = threading.Lock()
 
     def add_file(self, filename, data):
-        """Split file into chunks and start seeding."""
+        """Owner Action: Splits file into chunks and makes them available for others."""
         f_hash = hashlib.sha256(data).hexdigest()[:16]
         total = math.ceil(len(data) / CHUNK_SIZE)
         
@@ -28,16 +29,18 @@ class TorrentModule:
         for i in range(total):
             start = i * CHUNK_SIZE
             self.chunks[f_hash][i] = data[start:start + CHUNK_SIZE]
+        
         return f_hash
 
     def request_file(self, f_hash):
-        """Initialize download state and broadcast availability request."""
+        """Downloader Action: Broadcasts a request to find who has the file."""
         my_fp = self.node.pub_key.decode('utf-8')
         with self.lock:
+            # Initialize download state for this hash
             if f_hash not in self.pending:
                 self.pending[f_hash] = {"needed": set(), "total": None, "peers": {}}
 
-        # Ask all peers if they have this hash
+        # Ask all known peers if they are seeding this hash
         for peer_id in list(self.node.peers.keys()):
             self.node.send_onion_to_peer(peer_id, "torrent", {
                 "action": "who_has",
@@ -46,9 +49,11 @@ class TorrentModule:
             })
 
     def receive(self, payload):
+        """Unified Handler for all P2P Torrenting traffic."""
         action = payload.get("action")
         my_fp = self.node.pub_key.decode('utf-8')
 
+        # 1. OWNER SIDE: Someone is asking if I have a file
         if action == "who_has":
             req_hash = payload.get('hash')
             origin_fp = payload.get('origin_fp')
@@ -57,6 +62,7 @@ class TorrentModule:
                 total = self.files[req_hash]['total']
                 target_peer_id = self._find_peer_by_key(origin_fp)
                 if target_peer_id:
+                    # Tell the requester I have the file
                     self.node.send_onion_to_peer(target_peer_id, "torrent", {
                         "action": "have",
                         "hash": req_hash,
@@ -65,6 +71,7 @@ class TorrentModule:
                         "holder_fp": my_fp
                     })
 
+        # 2. DOWNLOADER SIDE: A peer told me they have chunks
         elif action == "have":
             f_hash = payload.get('hash')
             indices = payload.get('indices', [])
@@ -83,6 +90,7 @@ class TorrentModule:
                     entry['peers'][holder_peer_id] = set(indices)
                     self._request_next_chunk(f_hash)
 
+        # 3. OWNER SIDE: Someone is requesting a specific chunk from me
         elif action == "get_chunk":
             f_hash = payload.get('hash')
             idx = payload.get('index')
@@ -90,6 +98,7 @@ class TorrentModule:
             if f_hash in self.chunks and idx in self.chunks[f_hash]:
                 target_peer_id = self._find_peer_by_key(origin_fp)
                 if target_peer_id:
+                    # Serve the data chunk anonymously through an onion circuit
                     self.node.send_onion_to_peer(target_peer_id, "torrent", {
                         "action": "chunk",
                         "hash": f_hash,
@@ -98,6 +107,7 @@ class TorrentModule:
                         "holder_fp": my_fp
                     })
 
+        # 4. DOWNLOADER SIDE: I received a chunk of data
         elif action == "chunk":
             f_hash = payload.get('hash')
             idx = payload.get('index')
@@ -107,12 +117,11 @@ class TorrentModule:
                 if f_hash not in self.pending: return
                 entry = self.pending[f_hash]
                 
-                # Store chunk and mark as received
                 self.chunks.setdefault(f_hash, {})[idx] = data
-                entry['needed'].discard(idx) # CRITICAL: Progress the download
+                entry['needed'].discard(idx) # Mark this chunk as completed
 
                 if not entry['needed']:
-                    # Reassemble metadata once complete
+                    # Reassemble metadata once download is 100%
                     self.files[f_hash] = {
                         "name": f"Downloaded_{f_hash}", 
                         "size": sum(len(v) for v in self.chunks[f_hash].values()), 
@@ -124,7 +133,7 @@ class TorrentModule:
                     self._request_next_chunk(f_hash)
 
     def _request_next_chunk(self, f_hash):
-        """Find a peer who has the next needed chunk and request it."""
+        """Internal logic to fetch chunks sequentially from available peers."""
         entry = self.pending[f_hash]
         if not entry['needed']: return
 
@@ -140,7 +149,7 @@ class TorrentModule:
                 break
 
     def _find_peer_by_key(self, target_pub_key_str):
-        """Helper to map a public key string back to a Peer ID."""
+        """Maps a Public Key Fingerprint to an active Peer ID."""
         for pid, meta in self.node.peers.items():
             p_key = meta.get('pub_key')
             if isinstance(p_key, bytes):
