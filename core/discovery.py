@@ -118,8 +118,10 @@ class DiscoveryService(threading.Thread):
                 data, addr = s.recvfrom(65535)
                 unpacked = deserialize(data)
                 if not unpacked: continue
-                
-                msg_type, payload = unpacked
+
+                # `deserialize` returns a dict with keys 'type' and 'payload'
+                msg_type = unpacked.get('type')
+                payload = unpacked.get('payload')
                 
                 if msg_type == MSG_HELLO:
                     if self._validate_and_add_peer(payload):
