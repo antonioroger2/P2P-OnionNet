@@ -73,9 +73,7 @@ class DiscoveryService(threading.Thread):
 
     def manual_connect(self, host, port):
         """
-        Manually trigger a connection attempt.
-        Instead of connecting directly via TCP, we send a UDP HELLO.
-        This forces the handshake to go through our Secure Listener logic.
+        Fixed: Forces a direct UDP handshake to the target's discovery port.
         """
         msg = {
             "host": self.node.get_local_ip(),
@@ -83,34 +81,46 @@ class DiscoveryService(threading.Thread):
             "pub_key": self.node.pub_key.decode('utf-8')
         }
         try:
-            # We send to the standard Discovery Port (5000), not the data port.
-            # The other node is listening there.
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Use a specific timeout for manual attempts
+            s.settimeout(2)
             s.sendto(serialize(MSG_HELLO, msg), (host, DISCOVERY_PORT))
             s.close()
         except Exception as e:
             print(f"Manual connect failed: {e}")
 
     def listen_broadcasts(self):
-        """Secure Listener: Validates every incoming Hello packet."""
+        """
+        Fixed Listener: Uses REUSEPORT to allow multiple local nodes 
+        and correctly unpacks the version 39b5809 tuple format.
+        """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # This line is CRITICAL for running multiple nodes on one PC
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass 
+
         try:
             s.bind(('', DISCOVERY_PORT))
-        except:
-            print("Discovery port in use. Discovery disabled.")
+        except Exception as e:
+            print(f"Discovery port {DISCOVERY_PORT} binding error: {e}")
             return
 
         while self.running:
             try:
                 data, addr = s.recvfrom(4096)
-                msg_type, payload = deserialize(data)
-                
-                if msg_type == MSG_HELLO:
-                    self._validate_and_add_peer(payload)
-            except:
+                # Correctly unpack the (type, payload) tuple from your protocol
+                unpacked = deserialize(data)
+                if unpacked and len(unpacked) == 2:
+                    msg_type, payload = unpacked
+                    if msg_type == MSG_HELLO:
+                        self._validate_and_add_peer(payload)
+            except Exception:
                 continue
-
+            
     def _validate_and_add_peer(self, payload):
         """
         Security Logic: Trust-On-First-Use (TOFU)
