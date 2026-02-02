@@ -73,7 +73,7 @@ class DiscoveryService(threading.Thread):
 
     def manual_connect(self, host, port):
         """
-        Fixed: Forces a direct UDP handshake to the target's discovery port.
+        Fixed: Sends a UDP HELLO to the target's Discovery Port (5000).
         """
         msg = {
             "host": self.node.get_local_ip(),
@@ -82,8 +82,6 @@ class DiscoveryService(threading.Thread):
         }
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Use a specific timeout for manual attempts
-            s.settimeout(2)
             s.sendto(serialize(MSG_HELLO, msg), (host, DISCOVERY_PORT))
             s.close()
         except Exception as e:
@@ -91,36 +89,28 @@ class DiscoveryService(threading.Thread):
 
     def listen_broadcasts(self):
         """
-        Fixed Listener: Uses REUSEPORT to allow multiple local nodes 
-        and correctly unpacks the version 39b5809 tuple format.
+        Fixed: Properly unpacks the (type, payload) tuple and allows local testing.
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        # This line is CRITICAL for running multiple nodes on one PC
         try:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
-            pass 
-
-        try:
             s.bind(('', DISCOVERY_PORT))
         except Exception as e:
-            print(f"Discovery port {DISCOVERY_PORT} binding error: {e}")
+            print(f"Discovery port in use: {e}")
             return
 
         while self.running:
             try:
                 data, addr = s.recvfrom(4096)
-                # Correctly unpack the (type, payload) tuple from your protocol
                 unpacked = deserialize(data)
                 if unpacked and len(unpacked) == 2:
                     msg_type, payload = unpacked
                     if msg_type == MSG_HELLO:
                         self._validate_and_add_peer(payload)
-            except Exception:
+            except:
                 continue
-            
+
     def _validate_and_add_peer(self, payload):
         """
         Security Logic: Trust-On-First-Use (TOFU)
