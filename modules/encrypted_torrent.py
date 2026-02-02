@@ -9,10 +9,11 @@ class TorrentModule:
         self.node = node
         self.chunks = {}  # {file_hash: {index: data}}
         self.files = {}   # {file_hash: metadata}
-        self.pending = {} # {file_hash: {needed: set, total: int, peers: {}}}
+        self.pending = {} # {file_hash: {needed: set(), total: int, peers: {}}}
         self.lock = threading.Lock()
 
     def add_file(self, filename, data):
+        """Split file into chunks and start seeding."""
         f_hash = hashlib.sha256(data).hexdigest()[:16]
         total = math.ceil(len(data) / CHUNK_SIZE)
         
@@ -30,11 +31,13 @@ class TorrentModule:
         return f_hash
 
     def request_file(self, f_hash):
+        """Initialize download state and broadcast availability request."""
         my_fp = self.node.pub_key.decode('utf-8')
         with self.lock:
             if f_hash not in self.pending:
                 self.pending[f_hash] = {"needed": set(), "total": None, "peers": {}}
 
+        # Ask all peers if they have this hash
         for peer_id in list(self.node.peers.keys()):
             self.node.send_onion_to_peer(peer_id, "torrent", {
                 "action": "who_has",
@@ -104,16 +107,15 @@ class TorrentModule:
                 if f_hash not in self.pending: return
                 entry = self.pending[f_hash]
                 
-                # Store and remove from needed list
+                # Store chunk and mark as received
                 self.chunks.setdefault(f_hash, {})[idx] = data
-                entry['needed'].discard(idx) # CRITICAL FIX: Mark as done
+                entry['needed'].discard(idx) # CRITICAL: Progress the download
 
                 if not entry['needed']:
-                    # Finalize Download
-                    total_size = sum(len(v) for v in self.chunks[f_hash].values())
+                    # Reassemble metadata once complete
                     self.files[f_hash] = {
                         "name": f"Downloaded_{f_hash}", 
-                        "size": total_size, 
+                        "size": sum(len(v) for v in self.chunks[f_hash].values()), 
                         "total": entry['total'], 
                         "owner_fp": None
                     }
@@ -122,7 +124,7 @@ class TorrentModule:
                     self._request_next_chunk(f_hash)
 
     def _request_next_chunk(self, f_hash):
-        """Helper to pick a peer and ask for the next missing index"""
+        """Find a peer who has the next needed chunk and request it."""
         entry = self.pending[f_hash]
         if not entry['needed']: return
 
@@ -138,8 +140,8 @@ class TorrentModule:
                 break
 
     def _find_peer_by_key(self, target_pub_key_str):
+        """Helper to map a public key string back to a Peer ID."""
         for pid, meta in self.node.peers.items():
-            # Robust check for bytes vs string
             p_key = meta.get('pub_key')
             if isinstance(p_key, bytes):
                 p_key = p_key.decode('utf-8')

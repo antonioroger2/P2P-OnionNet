@@ -69,17 +69,15 @@ class RelayService:
             if decrypted_bytes is None: return
 
             layer_json = json.loads(decrypted_bytes.decode('utf-8'))
-            # Fix: Properly handle double-encoding if it exists
             inner_data = base64.b64decode(layer_json['data_b64'])
             next_hop = layer_json.get('next_hop')
 
             if next_hop is None:
-                # We are the Exit Node
+                # We are the Exit Node - trigger the local module (torrent/chat/proxy)
                 final_payload = json.loads(inner_data.decode('utf-8'))
-                # Use thread-safe handling for modules
                 self.node.handle_exit_traffic(final_payload)
             else:
-                # We are a Middle Node
+                # We are a Middle Node - forward to the next hop
                 host, port = next_hop
                 self.node.send_raw(host, port, MSG_ONION, inner_data)
         except Exception as e:
