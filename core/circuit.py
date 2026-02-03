@@ -19,6 +19,10 @@ class CircuitManager:
         """
         Builds a circuit that ends specifically at 'target_peer'.
         Path: Me -> Random -> Random -> Target
+        
+        NOTE: If there aren't enough distinct peers to build a full circuit,
+        the same peer may appear multiple times in the circuit path.
+        This weakens anonymity as that peer can correlate traffic from different layers.
         """
         peers = list(self.node.peers.values())
         if not peers: return []

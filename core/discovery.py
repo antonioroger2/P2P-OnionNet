@@ -16,19 +16,22 @@ class DiscoveryService(threading.Thread):
         self.discovery_port = 0  # Will be assigned dynamically by OS
         self.known_hosts = self._load_known_hosts()
         
-        # DEV MODE: Auto-reset trust
-        if os.path.exists(KNOWN_HOSTS_FILE):
-            try:
-                os.remove(KNOWN_HOSTS_FILE)
-            except:
-                pass
+        # DEV MODE: Auto-reset trust (only when explicitly enabled)
+        if os.getenv("DISCOVERY_DEV_MODE") == "1":
+            if os.path.exists(KNOWN_HOSTS_FILE):
+                try:
+                    os.remove(KNOWN_HOSTS_FILE)
+                    print("[DEV MODE] Cleared known_hosts.json for testing")
+                except OSError as e:
+                    print(f"[DiscoveryService] Failed to remove {KNOWN_HOSTS_FILE}: {e}")
 
     def _load_known_hosts(self):
         if os.path.exists(KNOWN_HOSTS_FILE):
             try:
                 with open(KNOWN_HOSTS_FILE, 'r') as f:
                     return json.load(f)
-            except:
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                print(f"[ERROR] Failed to load known_hosts.json: {e}")
                 return {}
         return {}
 
@@ -36,8 +39,8 @@ class DiscoveryService(threading.Thread):
         try:
             with open(KNOWN_HOSTS_FILE, 'w') as f:
                 json.dump(self.known_hosts, f, indent=4)
-        except:
-            pass
+        except (IOError, OSError) as e:
+            print(f"[ERROR] Failed to save known_hosts.json: {e}")
 
     def run(self):
         """Start the listener."""
@@ -56,8 +59,14 @@ class DiscoveryService(threading.Thread):
             print("[!] Manual connect failed: No port specified")
             return
 
-        print(f"[MANUAL] Pinging {host}:{target_port}...")
-        self._send_raw_hello(host, int(target_port))
+        try:
+            port = int(target_port)
+        except ValueError:
+            print(f"[!] Manual connect failed: Invalid port '{target_port}'. Port must be a number.")
+            return
+
+        print(f"[MANUAL] Pinging {host}:{port}...")
+        self._send_raw_hello(host, port)
 
     def _send_raw_hello(self, target_host, target_port):
         """Send identity packet to a specific target."""
@@ -87,8 +96,8 @@ class DiscoveryService(threading.Thread):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(serialize(MSG_PEX, pex_data), (target_host, target_port))
             s.close()
-        except:
-            pass
+        except (OSError, socket.error) as e:
+            print(f"[ERROR] Failed to send PEX: {e}")
 
     def listen_broadcasts(self):
         """
@@ -101,7 +110,8 @@ class DiscoveryService(threading.Thread):
         if hasattr(socket, 'SO_REUSEPORT'):
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except:
+            except OSError:
+                # Best-effort: SO_REUSEPORT is not available or usable on all platforms; safe to ignore.
                 pass
 
         try:
@@ -136,6 +146,7 @@ class DiscoveryService(threading.Thread):
                         self._validate_and_add_peer(peer_data)
 
             except Exception as e:
+                print(f"[ERROR] DiscoveryService listen_broadcasts exception: {e}")
                 continue
 
     def _validate_and_add_peer(self, payload):
@@ -147,12 +158,17 @@ class DiscoveryService(threading.Thread):
         if peer_port == self.node.port and peer_host == self.node.get_local_ip():
             return False
 
-        if peer_id in self.known_hosts:
-            if self.known_hosts[peer_id] != peer_key:
-                print(f"[SECURITY] BLOCKED MITM: {peer_id}")
+        # TOFU: Use host (without port) as the stable identifier
+        # This allows peers to legitimately change their TCP port between sessions
+        # without being flagged as MITM attacks
+        trusted_id = peer_host
+        
+        if trusted_id in self.known_hosts:
+            if self.known_hosts[trusted_id] != peer_key:
+                print(f"[SECURITY] BLOCKED MITM: {peer_id} (key mismatch for {trusted_id})")
                 return False
         else:
-            self.known_hosts[peer_id] = peer_key
+            self.known_hosts[trusted_id] = peer_key
             self._save_known_hosts()
 
         if peer_id not in self.node.peers:

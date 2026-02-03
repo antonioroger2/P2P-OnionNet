@@ -13,8 +13,14 @@ class ProxyModule:
         """
         my_fp = self.node.pub_key.decode('utf-8')
         
-        # Send anonymous request via random onion circuit
-        self.node.send_onion("proxy", {
+        # Send anonymous request via random peer's circuit
+        peers = list(self.node.peers.keys())
+        if not peers:
+            print("[PROXY] No peers available to route request")
+            return
+        
+        random_peer = peers[0] if len(peers) == 1 else __import__('random').choice(peers)
+        self.node.send_onion_to_peer(random_peer, "proxy", {
             "type": "request",
             "url": url, 
             "reply_to_fp": my_fp  # <--- No IP, just a key identity
@@ -57,6 +63,13 @@ class ProxyModule:
     def _find_peer_by_key(self, target_pub_key_str):
         """Helper to map a Public Key Fingerprint back to a Peer ID"""
         for pid, meta in self.node.peers.items():
-            if meta.get('pub_key').decode('utf-8') == target_pub_key_str:
+            pub_key = meta.get('pub_key')
+            if not pub_key:
+                continue
+            if isinstance(pub_key, (bytes, bytearray)):
+                pub_key_str = pub_key.decode('utf-8')
+            else:
+                pub_key_str = str(pub_key)
+            if pub_key_str == target_pub_key_str:
                 return pid
         return None

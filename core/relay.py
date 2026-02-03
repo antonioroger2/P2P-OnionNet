@@ -3,7 +3,7 @@ import threading
 import json
 import base64
 import struct
-from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_CHUNK, MSG_DIRECT
+from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_DIRECT
 from core.crypto import hybrid_decrypt
 
 class RelayService:
@@ -40,6 +40,12 @@ class RelayService:
             raw_msglen = self.recvall(conn, 4)
             if not raw_msglen: return
             msglen = struct.unpack('>I', raw_msglen)[0]
+            
+            # Validate message size to prevent DoS attacks
+            MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10MB limit
+            if msglen > MAX_MESSAGE_SIZE:
+                print(f"[SECURITY] Rejected message: size {msglen} exceeds limit {MAX_MESSAGE_SIZE}")
+                return
             
             # Read the full packet based on the prefix length
             data = self.recvall(conn, msglen)

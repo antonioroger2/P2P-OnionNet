@@ -75,6 +75,7 @@ class TorrentModule:
                 holder_peer_id = self._find_peer_by_key(holder_fp)
                 if holder_peer_id:
                     entry['peers'][holder_peer_id] = set(indices)
+                    # Keep lock held while calling _request_next_chunk to prevent race conditions
                     self._request_next_chunk(f_hash)
 
         elif action == "get_chunk":
@@ -113,6 +114,8 @@ class TorrentModule:
                     self._request_next_chunk(f_hash)
 
     def _request_next_chunk(self, f_hash):
+        # NOTE: This method must be called while self.lock is held
+        # to prevent race conditions when accessing shared state
         entry = self.pending[f_hash]
         if not entry['needed']: return
         next_idx = sorted(list(entry['needed']))[0]
