@@ -73,6 +73,9 @@ data/
 # data/*
 # !data/.gitkeep
 
+# TOFU security file - contains peer identities
+known_hosts.json
+
 # ------------------------------------------------
 # OS & IDE
 # ------------------------------------------------

@@ -2,7 +2,8 @@ import socket
 import threading
 import json
 import base64
-from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_CHUNK, MSG_DIRECT
+import struct
+from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_DIRECT
 from core.crypto import hybrid_decrypt
 
 class RelayService:
@@ -11,10 +12,11 @@ class RelayService:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
 
-    def bind_and_listen(self, port_range):
+    def bind_and_listen(self, port_range, bind_ip='0.0.0.0'):
+        """Attempts to bind the node to an available port in the range."""
         for port in port_range:
             try:
-                self.sock.bind(('127.0.0.1', port))
+                self.sock.bind((bind_ip, port))
                 self.sock.listen(5)
                 return port
             except OSError:
@@ -34,8 +36,19 @@ class RelayService:
 
     def _handle(self, conn):
         try:
-            # Increased buffer size for potentially large encrypted payloads
-            data = conn.recv(1024 * 64) 
+            # Read 4-byte length prefix
+            raw_msglen = self.recvall(conn, 4)
+            if not raw_msglen: return
+            msglen = struct.unpack('>I', raw_msglen)[0]
+            
+            # Validate message size to prevent DoS attacks
+            MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10MB limit
+            if msglen > MAX_MESSAGE_SIZE:
+                print(f"[SECURITY] Rejected message: size {msglen} exceeds limit {MAX_MESSAGE_SIZE}")
+                return
+            
+            # Read the full packet based on the prefix length
+            data = self.recvall(conn, msglen)
             if not data: return
             
             packet = deserialize(data)
@@ -46,17 +59,11 @@ class RelayService:
 
             if msg_type == MSG_HELLO:
                 self.node.add_peer(payload)
-
             elif msg_type == MSG_ONION:
                 self._process_onion(payload)
-
-            elif msg_type == MSG_CHUNK:
-                self.node.modules['torrent'].handle_chunk(payload)
-            
             elif msg_type == MSG_DIRECT:
-                # Direct response (e.g. from Proxy Exit Node back to Client)
                 mod = payload.get('module')
-                content = payload.get('content')
+                content = payload.get('payload')
                 if mod in self.node.modules:
                     self.node.modules[mod].receive(content)
 
@@ -65,35 +72,29 @@ class RelayService:
         finally:
             conn.close()
 
-    def _process_onion(self, encrypted_data):
-        """
-        Decrypts one layer. 
-        If next_hop is None -> We are Exit Node -> Process Payload.
-        If next_hop exists -> Relay encrypted inner data to next node.
-        """
-        try:
-            # 1. Decrypt using MY Private Key
-            decrypted_bytes = hybrid_decrypt(encrypted_data, self.node.private_key)
-            if decrypted_bytes is None:
-                print("Failed to decrypt onion layer.")
-                return
+    def recvall(self, sock, n):
+        """Helper to receive exactly n bytes to prevent fragmentation."""
+        data = bytearray()
+        while len(data) < n:
+            packet = sock.recv(n - len(data))
+            if not packet: return None
+            data.extend(packet)
+        return data
 
-            # 2. Parse the Layer (JSON)
+    def _process_onion(self, encrypted_data):
+        try:
+            decrypted_bytes = hybrid_decrypt(encrypted_data, self.node.private_key)
+            if decrypted_bytes is None: return
+
             layer_json = json.loads(decrypted_bytes.decode('utf-8'))
-            
-            # 3. Extract Inner Data
             inner_data = base64.b64decode(layer_json['data_b64'])
             next_hop = layer_json.get('next_hop')
 
             if next_hop is None:
-                # I am the Exit Node!
-                # Inner data is the final payload
                 final_payload = json.loads(inner_data.decode('utf-8'))
                 self.node.handle_exit_traffic(final_payload)
             else:
-                # Relay to Next Hop
                 host, port = next_hop
                 self.node.send_raw(host, port, MSG_ONION, inner_data)
-
         except Exception as e:
             print(f"Onion Processing Error: {e}")
