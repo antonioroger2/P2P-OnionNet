@@ -52,11 +52,16 @@ class OnionNode:
         self.peers[pid] = peer_data
 
     def get_local_ip(self):
+        """
+        Determines local IP by connecting to a public DNS server.
+        Note: In networks without internet access or with restrictive firewall rules,
+        this will fail and fall back to '127.0.0.1', which may cause issues in LAN-only deployments.
+        """
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        except:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+        except Exception:
             return '127.0.0.1'
 
     def send_onion_to_peer(self, target_peer_id, destination_module, payload):

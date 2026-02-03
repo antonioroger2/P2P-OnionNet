@@ -7,7 +7,7 @@ from ui.pages_http_proxy import render_proxy
 def render_dashboard(node):
     # Initialize session state for manual connection fields if not present
     if "target_ip" not in st.session_state:
-        st.session_state.target_ip = "10.172."
+        st.session_state.target_ip = ""
     if "target_port" not in st.session_state:
         st.session_state.target_port = ""
 
@@ -49,7 +49,7 @@ def render_dashboard(node):
                         # Note: We don't know their UDP port from the PID (which is TCP), 
                         # but we can fill the IP to save time.
                         st.rerun()
-                    except:
+                    except ValueError:
                         pass
 
         if st.button("Refresh Network"):
@@ -64,5 +64,6 @@ def render_dashboard(node):
     with tab3:
         render_proxy(node)
 
-    time.sleep(1)
+    # Reduce refresh frequency to avoid excessive CPU usage from constant reruns
+    time.sleep(10)
     st.rerun()
