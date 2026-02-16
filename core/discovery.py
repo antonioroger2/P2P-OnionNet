@@ -3,10 +3,17 @@ import threading
 import time
 import json
 import os
+import random
 from core.protocol import MSG_HELLO, MSG_PEX, serialize, deserialize
 
 # Security: File to store trusted peer identities
 KNOWN_HOSTS_FILE = "known_hosts.json"
+
+# Bootstrap nodes: Known stable entry points for auto-discovery.
+# Format: [("host", port), ...]  — Add your own bootstrap node addresses here.
+BOOTSTRAP_NODES = [
+    # ("1.2.3.4", 5000),  # Example: uncomment and set to a real bootstrap node
+]
 
 class DiscoveryService(threading.Thread):
     def __init__(self, node):
@@ -46,10 +53,25 @@ class DiscoveryService(threading.Thread):
         """Start the listener."""
         threading.Thread(target=self.listen_broadcasts, daemon=True).start()
         
+        # Auto-connect to bootstrap nodes on startup
+        time.sleep(1)  # Wait briefly for listener to bind
+        for host, port in BOOTSTRAP_NODES:
+            print(f"[BOOTSTRAP] Connecting to {host}:{port}...")
+            self._send_raw_hello(host, port)
+        
         while self.running:
-            # We don't broadcast blindly anymore since ports are random.
-            # We rely on Manual Connect + PEX (Gossip).
-            time.sleep(5)
+            # Periodically gossip peer lists to all known peers
+            self._gossip_round()
+            time.sleep(30)
+
+    def _gossip_round(self):
+        """Periodically share our peer list with all known peers."""
+        if not self.node.peers:
+            return
+        for pid, meta in list(self.node.peers.items()):
+            disc_port = meta.get('discovery_port')
+            if disc_port:
+                self.send_pex(meta['host'], disc_port)
 
     def manual_connect(self, host, target_port):
         """
@@ -69,11 +91,26 @@ class DiscoveryService(threading.Thread):
         self._send_raw_hello(host, port)
 
     def _send_raw_hello(self, target_host, target_port):
-        """Send identity packet to a specific target."""
+        """Send identity packet to a specific target, including gossip peers."""
+        # Attach up to 5 random peers for gossip
+        gossip_peers = []
+        peer_list = list(self.node.peers.values())
+        sample_size = min(5, len(peer_list))
+        if sample_size > 0:
+            for p in random.sample(peer_list, sample_size):
+                gossip_peers.append({
+                    "host": p['host'],
+                    "port": p['port'],
+                    "discovery_port": p.get('discovery_port'),
+                    "pub_key": p['pub_key'].decode('utf-8') if isinstance(p['pub_key'], bytes) else p['pub_key']
+                })
+
         msg = {
             "host": self.node.get_local_ip(),
-            "port": self.node.port,         # My TCP Data Port
-            "pub_key": self.node.pub_key.decode('utf-8')
+            "port": self.node.port,             # My TCP Data Port
+            "discovery_port": self.discovery_port,  # My UDP Discovery Port
+            "pub_key": self.node.pub_key.decode('utf-8'),
+            "gossip_peers": gossip_peers
         }
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -89,6 +126,7 @@ class DiscoveryService(threading.Thread):
             pex_data.append({
                 "host": meta['host'],
                 "port": meta['port'],
+                "discovery_port": meta.get('discovery_port'),
                 "pub_key": meta['pub_key'].decode('utf-8') if isinstance(meta['pub_key'], bytes) else meta['pub_key']
             })
         
@@ -134,16 +172,35 @@ class DiscoveryService(threading.Thread):
                 payload = unpacked.get('payload')
                 
                 if msg_type == MSG_HELLO:
+                    # Extract gossip peers before adding the sender
+                    gossip_peers = payload.pop('gossip_peers', [])
+                    sender_disc_port = payload.get('discovery_port')
+
                     if self._validate_and_add_peer(payload):
-                        # Reply to the sender so they know us too
-                        # Note: We don't know their listening port unless they told us, 
-                        # but for UDP hole punching we often reply to addr[1].
-                        # For this strict firewall, we assume Manual Connect is 2-way.
                         print(f"[+] Handshake from {addr}")
-                
+                        # Reply so the sender knows us too
+                        if sender_disc_port:
+                            self._send_raw_hello(addr[0], sender_disc_port)
+                    
+                    # Auto-discover gossip peers we don't know yet
+                    for gp in gossip_peers:
+                        gp_id = f"{gp['host']}:{gp['port']}"
+                        if gp_id not in self.node.peers:
+                            gp_copy = {k: v for k, v in gp.items() if k != 'discovery_port'}
+                            gp_copy['discovery_port'] = gp.get('discovery_port')
+                            self._validate_and_add_peer(gp_copy)
+                            # Try to reach them directly
+                            gp_disc = gp.get('discovery_port')
+                            if gp_disc:
+                                self._send_raw_hello(gp['host'], gp_disc)
+
                 elif msg_type == MSG_PEX:
                     for peer_data in payload:
-                        self._validate_and_add_peer(peer_data)
+                        if self._validate_and_add_peer(peer_data):
+                            # Try to reach new PEX peers directly
+                            disc_port = peer_data.get('discovery_port')
+                            if disc_port:
+                                self._send_raw_hello(peer_data['host'], disc_port)
 
             except Exception as e:
                 print(f"[ERROR] DiscoveryService listen_broadcasts exception: {e}")

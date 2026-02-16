@@ -8,39 +8,47 @@ class CircuitManager:
         self.node = node
 
     def build_circuit(self, hops=3):
-        """Original Random Circuit (Keep this for anonymous browsing)"""
+        """Dynamic circuit: adapts hop count based on available peers."""
         peers = list(self.node.peers.values())
-        if not peers: return []
-        # Sample with replacement if not enough peers, or just use what we have
-        count = min(len(peers), hops)
-        return random.sample(peers, count)
+        if not peers:
+            print("[CIRCUIT] No peers available - offline")
+            return []
+        # Dynamic: degrade gracefully with fewer peers
+        effective_hops = min(hops, len(peers))
+        if effective_hops < hops:
+            print(f"[CIRCUIT] Degraded to {effective_hops}-hop circuit ({len(peers)} peers available)")
+        return random.sample(peers, effective_hops)
 
     def build_circuit_to_target(self, target_peer, hops=3):
         """
         Builds a circuit that ends specifically at 'target_peer'.
         Path: Me -> Random -> Random -> Target
         
-        NOTE: If there aren't enough distinct peers to build a full circuit,
-        the same peer may appear multiple times in the circuit path.
-        This weakens anonymity as that peer can correlate traffic from different layers.
+        Dynamic hop count: degrades gracefully based on available peers.
+        - 0 peers: returns [] (offline)
+        - 1-2 peers: 1-hop direct circuit to target
+        - 3+ peers: full multi-hop onion circuit
         """
         peers = list(self.node.peers.values())
-        if not peers: return []
+        if not peers:
+            print("[CIRCUIT] No peers available - offline")
+            return []
+
+        # Dynamic hop count based on peer availability
+        effective_hops = min(hops, len(peers))
+        if effective_hops < hops:
+            print(f"[CIRCUIT] Degraded to {effective_hops}-hop circuit ({len(peers)} peers available)")
 
         # 1. Start with the target as the Exit Node
         circuit = [target_peer]
         
-        # 2. Fill the rest with random peers (Middle Nodes)
-        # We try to avoid picking the target again if possible
+        # 2. Fill the rest with random middle nodes
         available_middle = [p for p in peers if p != target_peer]
-        
-        # If we don't have enough other peers, we just reuse/shorten
-        needed = hops - 1
+        needed = effective_hops - 1
         if needed > 0:
             if len(available_middle) >= needed:
                 circuit = random.sample(available_middle, needed) + circuit
             else:
-                # Not enough peers for a full path, just go Direct or Short
                 circuit = available_middle + circuit
 
         return circuit
