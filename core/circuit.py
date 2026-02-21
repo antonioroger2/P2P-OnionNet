@@ -8,24 +8,60 @@ class CircuitManager:
         self.node = node
 
     def build_circuit(self, hops=3):
-        """Selects random peers to form a path."""
+        """Dynamic circuit: adapts hop count based on available peers."""
         peers = list(self.node.peers.values())
-        if len(peers) < hops:
-            return peers  # Short circuit if not enough peers
-        return random.sample(peers, hops)
+        if not peers:
+            print("[CIRCUIT] No peers available - offline")
+            return []
+        # Dynamic: degrade gracefully with fewer peers
+        effective_hops = min(hops, len(peers))
+        if effective_hops < hops:
+            print(f"[CIRCUIT] Degraded to {effective_hops}-hop circuit ({len(peers)} peers available)")
+        return random.sample(peers, effective_hops)
+
+    def build_circuit_to_target(self, target_peer, hops=3):
+        """
+        Builds a circuit that ends specifically at 'target_peer'.
+        Path: Me -> Random -> Random -> Target
+        
+        Dynamic hop count: degrades gracefully based on available peers.
+        - 0 peers: returns [] (offline)
+        - 1-2 peers: 1-hop direct circuit to target
+        - 3+ peers: full multi-hop onion circuit
+        """
+        peers = list(self.node.peers.values())
+        if not peers:
+            print("[CIRCUIT] No peers available - offline")
+            return []
+
+        # Dynamic hop count based on peer availability
+        effective_hops = min(hops, len(peers))
+        if effective_hops < hops:
+            print(f"[CIRCUIT] Degraded to {effective_hops}-hop circuit ({len(peers)} peers available)")
+
+        # 1. Start with the target as the Exit Node
+        circuit = [target_peer]
+        
+        # 2. Fill the rest with random middle nodes
+        available_middle = [p for p in peers if p != target_peer]
+        needed = effective_hops - 1
+        if needed > 0:
+            if len(available_middle) >= needed:
+                circuit = random.sample(available_middle, needed) + circuit
+            else:
+                circuit = available_middle + circuit
+
+        return circuit
 
     def wrap_onion(self, final_payload, circuit):
         """
         Wraps message in layers: Enc_A( IP_B, Enc_B( IP_C, Enc_C( Payload ) ) )
         """
         # Serialize the initial payload to bytes (JSON)
-        # This payload is what the Exit Node will see.
         message_bytes = json.dumps(final_payload).encode('utf-8')
 
         # Logic: We start from the Exit node and wrap backwards to the Entry node.
-        # This ensures that when the Entry node peels its layer, it sees the Middle node's address.
-        
-        next_hop_addr = None  # The Exit node has no next hop (it processes the data)
+        next_hop_addr = None  
 
         for peer in reversed(circuit):
             # 1. Construct the layer content
@@ -34,14 +70,11 @@ class CircuitManager:
                 "data_b64": base64.b64encode(message_bytes).decode('utf-8')
             }
             
-            # 2. Serialize this layer to bytes so it can be encrypted
+            # 2. Serialize and Encrypt
             serialized_layer = json.dumps(layer_content).encode('utf-8')
-            
-            # 3. Encrypt for the current node using their Public Key
             message_bytes = hybrid_encrypt(serialized_layer, peer['pub_key'])
             
-            # 4. Set next_hop for the *next* iteration (previous node in the path)
-            # This node (peer) will be the 'next_hop' for the node before it.
+            # 3. Set next_hop for the *next* iteration
             next_hop_addr = (peer['host'], peer['port'])
 
         return message_bytes
