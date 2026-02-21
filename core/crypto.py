@@ -58,14 +58,17 @@ def hybrid_decrypt(payload: bytes, private_key) -> bytes:
     Decrypts using RSA + AES-GCM.
     """
     try:
-        # RSA 2048 Key Size = 256 bytes
-        # AES-GCM Nonce = 12 bytes
-        if len(payload) < 268: 
+        # RSA encrypted key size is derived from private key size in bytes.
+        # AES-GCM Nonce size = 12 bytes.
+        rsa_block_size = private_key.key_size // 8
+        min_payload_size = rsa_block_size + 12
+
+        if len(payload) < min_payload_size:
             return None
 
-        encrypted_key = payload[:256]
-        nonce = payload[256:268]
-        ciphertext = payload[268:]
+        encrypted_key = payload[:rsa_block_size]
+        nonce = payload[rsa_block_size:rsa_block_size + 12]
+        ciphertext = payload[rsa_block_size + 12:]
         
         # 1. Decrypt AES Key
         aes_key = private_key.decrypt(
