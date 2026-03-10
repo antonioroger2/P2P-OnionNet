@@ -239,3 +239,10 @@ class TorrentModule:
             # No peers responded, mark as no seed
             self.file_status[f_hash] = "no_seed"
             print(f"[TORRENT] No seed found for {f_hash}, stopping download.")
+
+    def _find_peer_by_key(self, target_pub_key_str):
+        for pid, meta in self.node.peers.items():
+            p_key = meta.get('pub_key')
+            if isinstance(p_key, bytes): p_key = p_key.decode('utf-8')
+            if p_key == target_pub_key_str: return pid
+        return None
