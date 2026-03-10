@@ -3,54 +3,64 @@ import streamlit as st
 def render_torrent(node):
     st.subheader("Decentralized Swarm")
 
-    # 1. Upload Section
     st.markdown("### 📤 Seed a File")
     uploaded = st.file_uploader("Choose a file to seed", label_visibility="collapsed")
     if uploaded and st.button("Seed File"):
         data = uploaded.read()
         f_hash = node.modules['torrent'].add_file(uploaded.name, data)
-        st.success(f"Seeding! Share this Magnet Hash:")
-        st.code(f_hash)
+        st.success(f"Seeding! Share this Magnet Hash: `{f_hash}`")
 
     st.divider()
 
-    # 2. Download Section (NEW)
     st.markdown("### 📥 Download from Swarm")
     target_hash = st.text_input("Enter Magnet Hash")
     if st.button("Download File"):
         if target_hash:
-            st.info(f"Broadcasting anonymous request for {target_hash}...")
-            # This calls our new anonymous request_file method
             node.modules['torrent'].request_file(target_hash)
+            st.info(f"Connecting to peers for {target_hash}...")
         else:
             st.warning("Please enter a hash.")
 
     st.divider()
+    st.write("### 🗃️ Active Transfers & Storage")
 
-    # 3. Storage Section
-    st.write("### 📂 My Storage")
-    if not node.modules['torrent'].files:
+    # Combine all known hashes
+    all_hashes = set(node.modules['torrent'].files.keys()).union(node.modules['torrent'].pending.keys())
+    if not all_hashes:
         st.caption("No files yet.")
-    
-    for f_hash, meta in node.modules['torrent'].files.items():
-        with st.expander(f"📄 {meta['name']}"):
+
+    for f_hash in all_hashes:
+        status = node.modules['torrent'].file_status.get(f_hash, "unknown")
+        meta = node.modules['torrent'].files.get(f_hash) or {}
+        is_pending = f_hash in node.modules['torrent'].pending
+
+        # Determine sizes and counts
+        total_chunks = meta.get('total') or (node.modules['torrent'].pending[f_hash]['total'] if is_pending else 0)
+        have_chunks = len(node.modules['torrent'].chunks.get(f_hash, {}))
+
+        icon = "▶️" if status in ["seeding", "downloading"] else "⏸️"
+        status_color = "green" if status == "seeding" else "blue" if status == "downloading" else "red"
+
+        name_display = meta.get('name', f"Resolving {f_hash[:8]}...")
+
+        with st.expander(f"{icon} {name_display} [:{status_color}[{status.upper()}]]"):
             st.caption(f"Hash: {f_hash}")
-            st.caption(f"Size: {meta['size']} bytes")
-            
-            # Fix: Define chunks_dict by accessing the module's chunk storage
-            if f_hash in node.modules['torrent'].chunks:
-                chunks_dict = node.modules['torrent'].chunks[f_hash]
-                
-                # Only allow saving to disk if we have all the parts
-                if len(chunks_dict) == meta['total']: 
-                    # Assemble chunks in order
+
+            if total_chunks:
+                progress = have_chunks / total_chunks
+                st.progress(progress)
+                st.caption(f"Chunks: {have_chunks}/{total_chunks} ({int(progress*100)}%)")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                action_text = "Pause" if status in ["downloading", "seeding"] else "Resume"
+                if st.button(action_text, key=f"btn_{f_hash}"):
+                    node.modules['torrent'].toggle_pause(f_hash)
+                    st.rerun()
+
+            with col2:
+                # Save to disk if complete
+                if have_chunks == total_chunks and total_chunks > 0:
+                    chunks_dict = node.modules['torrent'].chunks[f_hash]
                     data = b"".join(chunks_dict[i] for i in sorted(chunks_dict.keys()))
-                    st.download_button(
-                        label="Save to Disk",
-                        data=data,
-                        file_name=meta['name']
-                    )
-                else:
-                    progress = len(chunks_dict) / meta['total']
-                    st.progress(progress)
-                    st.caption(f"Downloading... {len(chunks_dict)}/{meta['total']} chunks")
+                    st.download_button("Save to Disk", data=data, file_name=meta.get('name', f_hash), key=f"dl_{f_hash}")
