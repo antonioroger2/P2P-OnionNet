@@ -3,6 +3,20 @@ import json
 import base64
 from core.crypto import hybrid_encrypt
 
+def json_bytes_handler(obj):
+    if isinstance(obj, bytes):
+        return {'__bytes__': base64.b64encode(obj).decode('utf-8')}
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+def decode_helper(item):
+    if isinstance(item, dict) and '__bytes__' in item:
+        return base64.b64decode(item['__bytes__'])
+    elif isinstance(item, dict):
+        return {k: decode_helper(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [decode_helper(i) for i in item]
+    return item
+
 class CircuitManager:
     def __init__(self, node):
         self.node = node
@@ -58,7 +72,8 @@ class CircuitManager:
         Wraps message in layers: Enc_A( IP_B, Enc_B( IP_C, Enc_C( Payload ) ) )
         """
         # Serialize the initial payload to bytes (JSON)
-        message_bytes = json.dumps(final_payload).encode('utf-8')
+        # FIX: Use the default handler for bytes. This prevents the "Object of type bytes is not JSON serializable" crash.
+        message_bytes = json.dumps(final_payload, default=json_bytes_handler).encode('utf-8')
 
         # Logic: We start from the Exit node and wrap backwards to the Entry node.
         next_hop_addr = None  
@@ -71,7 +86,8 @@ class CircuitManager:
             }
             
             # 2. Serialize and Encrypt
-            serialized_layer = json.dumps(layer_content).encode('utf-8')
+            # FIX: Use handler here as well for safety
+            serialized_layer = json.dumps(layer_content, default=json_bytes_handler).encode('utf-8')
             message_bytes = hybrid_encrypt(serialized_layer, peer['pub_key'])
             
             # 3. Set next_hop for the *next* iteration

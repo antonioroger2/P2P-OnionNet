@@ -4,13 +4,12 @@ import time
 import json
 import os
 import random
+import errno
 from core.protocol import MSG_HELLO, MSG_PEX, serialize, deserialize
 
-# Security: File to store trusted peer identities
 KNOWN_HOSTS_FILE = "known_hosts.json"
 
-# Bootstrap nodes: Known stable entry points for auto-discovery.
-# Format: [("host", port), ...]  — Add your own bootstrap node addresses here.
+
 BOOTSTRAP_NODES = [
     # ("1.2.3.4", 5000),  # Example: uncomment and set to a real bootstrap node
 ]
@@ -116,6 +115,12 @@ class DiscoveryService(threading.Thread):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(serialize(MSG_HELLO, msg), (target_host, target_port))
             s.close()
+        except OSError as e:
+            # FIX: Suppress "Network is unreachable" which is common in some setups
+            if e.errno == errno.ENETUNREACH:
+                print(f"[WARN] Network unreachable when sending Hello to {target_host}")
+            else:
+                print(f"[!] Send Error: {e}")
         except Exception as e:
             print(f"[!] Send Error: {e}")
 
@@ -134,8 +139,12 @@ class DiscoveryService(threading.Thread):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(serialize(MSG_PEX, pex_data), (target_host, target_port))
             s.close()
-        except (OSError, socket.error) as e:
-            print(f"[ERROR] Failed to send PEX: {e}")
+        except OSError as e:
+            # FIX: Suppress network unreachable errors
+            if e.errno == errno.ENETUNREACH:
+                pass 
+            else:
+                print(f"[ERROR] Failed to send PEX: {e}")
 
     def listen_broadcasts(self):
         """
@@ -149,7 +158,6 @@ class DiscoveryService(threading.Thread):
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError:
-                # Best-effort: SO_REUSEPORT is not available or usable on all platforms; safe to ignore.
                 pass
 
         try:
@@ -167,7 +175,6 @@ class DiscoveryService(threading.Thread):
                 unpacked = deserialize(data)
                 if not unpacked: continue
 
-                # `deserialize` returns a dict with keys 'type' and 'payload'
                 msg_type = unpacked.get('type')
                 payload = unpacked.get('payload')
                 
@@ -189,7 +196,6 @@ class DiscoveryService(threading.Thread):
                             gp_copy = {k: v for k, v in gp.items() if k != 'discovery_port'}
                             gp_copy['discovery_port'] = gp.get('discovery_port')
                             self._validate_and_add_peer(gp_copy)
-                            # Try to reach them directly
                             gp_disc = gp.get('discovery_port')
                             if gp_disc:
                                 self._send_raw_hello(gp['host'], gp_disc)
@@ -197,7 +203,6 @@ class DiscoveryService(threading.Thread):
                 elif msg_type == MSG_PEX:
                     for peer_data in payload:
                         if self._validate_and_add_peer(peer_data):
-                            # Try to reach new PEX peers directly
                             disc_port = peer_data.get('discovery_port')
                             if disc_port:
                                 self._send_raw_hello(peer_data['host'], disc_port)
@@ -216,8 +221,6 @@ class DiscoveryService(threading.Thread):
             return False
 
         # TOFU: Use host (without port) as the stable identifier
-        # This allows peers to legitimately change their TCP port between sessions
-        # without being flagged as MITM attacks
         trusted_id = peer_host
         
         if trusted_id in self.known_hosts:
