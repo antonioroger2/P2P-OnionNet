@@ -1,183 +1,130 @@
-import socket
 import threading
 import uuid
-import select
+import random
+from urllib.parse import urlparse
+
+import requests
+
 from core.protocol import MSG_DIRECT
 
 class ProxyModule:
     def __init__(self, node):
         self.node = node
-        self.local_proxy_port = 8080
-        self.proxy_running = False
-        self.server_sock = None
+        self.request_timeout = 20
 
-        # stream_id -> local client socket
-        self.client_streams = {}
-        # stream_id -> remote target socket (Exit Node side)
-        self.exit_streams = {}
+        # request_id -> threading.Event
+        self.pending_events = {}
+        # request_id -> response payload
+        self.pending_results = {}
+        self._lock = threading.Lock()
 
-    def start_local_proxy(self, port=8080):
-        if self.proxy_running: return False
-        self.local_proxy_port = port
-        self.proxy_running = True
+    def fetch_url(self, target_url, timeout=None):
+        timeout = timeout or self.request_timeout
+        target_url = (target_url or "").strip()
+        if not target_url:
+            return {"ok": False, "error": "URL cannot be empty."}
 
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind(('127.0.0.1', self.local_proxy_port))
-        self.server_sock.listen(100)
+        if not target_url.startswith(("http://", "https://")):
+            target_url = f"http://{target_url}"
 
-        threading.Thread(target=self._accept_clients, daemon=True).start()
-        return True
+        parsed = urlparse(target_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return {"ok": False, "error": "Only valid http/https URLs are supported."}
 
-    def stop_local_proxy(self):
-        self.proxy_running = False
-        if self.server_sock:
-            self.server_sock.close()
+        peers = list(self.node.peers.keys())
+        if not peers:
+            return {"ok": False, "error": "No peers available. Connect to at least one peer first."}
 
-    def _accept_clients(self):
-        """Listens for local browser/app connections (HTTP CONNECT Proxy format)."""
-        while self.proxy_running:
-            try:
-                client_sock, addr = self.server_sock.accept()
-                threading.Thread(target=self._handle_local_client, args=(client_sock,), daemon=True).start()
-            except Exception:
-                break
+        request_id = uuid.uuid4().hex
+        evt = threading.Event()
+        with self._lock:
+            self.pending_events[request_id] = evt
 
-    def _handle_local_client(self, client_sock):
-        """Intercepts HTTP CONNECT and sets up the P2P Tunnel."""
-        stream_id = None
-        try:
-            req = client_sock.recv(4096)
-            if not req: return
+        exit_peer = random.choice(peers)
+        self.node.send_onion_to_peer(exit_peer, "proxy", {
+            "type": "web_fetch",
+            "request_id": request_id,
+            "url": target_url,
+            "reply_to_fp": self.node.pub_key.decode("utf-8"),
+            "reply_to_host": self.node.get_local_ip(),
+            "reply_to_port": self.node.port,
+        })
 
-            # Basic HTTP CONNECT parser (Browser HTTPS proxying)
-            lines = req.split(b'\r\n')
-            first_line = lines[0].decode('utf-8', errors='ignore')
+        if not evt.wait(timeout=timeout):
+            with self._lock:
+                self.pending_events.pop(request_id, None)
+                self.pending_results.pop(request_id, None)
+            return {"ok": False, "error": "Request timed out waiting for an exit node response."}
 
-            if first_line.startswith('CONNECT'):
-                # Format: CONNECT host:port HTTP/1.1
-                target = first_line.split(' ')[1]
-                host, port = target.split(':')
+        with self._lock:
+            response = self.pending_results.pop(request_id, None)
+            self.pending_events.pop(request_id, None)
 
-                # Tell browser connection is established
-                client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-
-                stream_id = uuid.uuid4().hex
-                self.client_streams[stream_id] = client_sock
-
-                # Pick an exit node and initiate stream
-                peers = list(self.node.peers.keys())
-                if not peers:
-                    client_sock.close()
-                    return
-                import random
-                exit_peer = random.choice(peers)
-
-                self.node.send_onion_to_peer(exit_peer, "proxy", {
-                    "type": "stream_init",
-                    "stream_id": stream_id,
-                    "target_host": host,
-                    "target_port": int(port),
-                    "reply_to_fp": self.node.pub_key.decode('utf-8'),
-                    "reply_to_host": self.node.get_local_ip(),
-                    "reply_to_port": self.node.port
-                })
-
-                # Forward data from Browser -> Onion Network
-                while self.proxy_running:
-                    data = client_sock.recv(16384)
-                    if not data: break
-                    self.node.send_onion_to_peer(exit_peer, "proxy", {
-                        "type": "stream_data",
-                        "stream_id": stream_id,
-                        "data": data  # base64 handled by protocol.py
-                    })
-            else:
-                client_sock.close() # Only support CONNECT tunnels for security/simplicity
-
-        except Exception:
-            pass
-        finally:
-            if stream_id:
-                self.client_streams.pop(stream_id, None)
-            try: client_sock.close()
-            except: pass
+        if not response:
+            return {"ok": False, "error": "No response payload received."}
+        return response
 
     def receive(self, payload):
-        """Handles Exit Node tunneling and Client Side returning traffic."""
+        """Handles web fetch requests (exit role) and replies (client role)."""
         msg_type = payload.get('type')
-        stream_id = payload.get('stream_id')
+        request_id = payload.get('request_id')
 
-        # --- EXIT NODE LOGIC ---
-        if msg_type == "stream_init":
-            target_host = payload.get('target_host')
-            target_port = payload.get('target_port')
-            reply_fp = payload.get('reply_to_fp')
-            reply_host = payload.get('reply_to_host')
-            reply_port = payload.get('reply_to_port')
+        if msg_type == "web_fetch":
+            threading.Thread(target=self._handle_web_fetch_as_exit, args=(payload,), daemon=True).start()
+        elif msg_type == "web_fetch_reply" and request_id:
+            with self._lock:
+                self.pending_results[request_id] = payload
+                evt = self.pending_events.get(request_id)
+            if evt:
+                evt.set()
 
-            try:
-                # Open socket to actual internet
-                remote_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                remote_sock.settimeout(5)
-                remote_sock.connect((target_host, target_port))
-                self.exit_streams[stream_id] = {
-                    "sock": remote_sock,
-                    "reply_fp": reply_fp,
-                    "reply_host": reply_host,
-                    "reply_port": reply_port
-                }
+    def _handle_web_fetch_as_exit(self, payload):
+        request_id = payload.get("request_id")
+        target_url = (payload.get("url") or "").strip()
+        reply_payload = {
+            "type": "web_fetch_reply",
+            "request_id": request_id,
+            "ok": False,
+            "status_code": None,
+            "html": "",
+            "error": "Unknown error",
+            "url": target_url,
+        }
 
-                # Start thread to push internet data -> Onion Network
-                threading.Thread(target=self._exit_node_reader, args=(stream_id,), daemon=True).start()
-            except Exception:
-                pass # Connection refused by target
-
-        elif msg_type == "stream_data" and stream_id in self.exit_streams:
-            # P2P overlay -> Internet Target
-            try:
-                self.exit_streams[stream_id]["sock"].sendall(payload.get('data'))
-            except Exception:
-                pass
-
-        # --- CLIENT SIDE LOGIC (Receiving data back from Exit Node) ---
-        elif msg_type == "stream_reply" and stream_id in self.client_streams:
-            # Exit node -> Local Browser
-            try:
-                self.client_streams[stream_id].sendall(payload.get('data'))
-            except Exception:
-                pass
-
-    def _exit_node_reader(self, stream_id):
-        """Reads from actual internet and sends back through overlay."""
-        meta = self.exit_streams[stream_id]
-        sock = meta['sock']
+        if not target_url:
+            reply_payload["error"] = "Missing target URL"
+            self._send_fetch_reply(payload, reply_payload)
+            return
 
         try:
-            while True:
-                data = sock.recv(16384)
-                if not data: break
+            headers = {
+                "User-Agent": "OnionNet-WebFetch/1.0"
+            }
+            resp = requests.get(target_url, timeout=12, headers=headers)
+            reply_payload.update({
+                "ok": True,
+                "status_code": resp.status_code,
+                "html": resp.text,
+                "error": "",
+            })
+        except Exception as exc:
+            reply_payload["error"] = str(exc)
 
-                reply_payload = {
-                    "type": "stream_reply",
-                    "stream_id": stream_id,
-                    "data": data
-                }
+        self._send_fetch_reply(payload, reply_payload)
 
-                # Route back to client
-                target_peer = self._find_peer_by_key(meta['reply_fp'])
-                if target_peer:
-                    self.node.send_onion_to_peer(target_peer, "proxy", reply_payload)
-                else:
-                    self.node.send_raw(meta['reply_host'], int(meta['reply_port']), MSG_DIRECT, {
-                        "module": "proxy", "payload": reply_payload
-                    })
-        except Exception:
-            pass
-        finally:
-            self.exit_streams.pop(stream_id, None)
-            try: sock.close()
-            except: pass
+    def _send_fetch_reply(self, request_payload, reply_payload):
+        reply_fp = request_payload.get("reply_to_fp")
+        reply_host = request_payload.get("reply_to_host")
+        reply_port = request_payload.get("reply_to_port")
+
+        target_peer = self._find_peer_by_key(reply_fp)
+        if target_peer:
+            self.node.send_onion_to_peer(target_peer, "proxy", reply_payload)
+        elif reply_host and reply_port:
+            self.node.send_raw(reply_host, int(reply_port), MSG_DIRECT, {
+                "module": "proxy",
+                "payload": reply_payload,
+            })
 
     def _find_peer_by_key(self, target_pub_key_str):
         for pid, meta in self.node.peers.items():
@@ -185,3 +132,10 @@ class ProxyModule:
             if isinstance(p_key, bytes): p_key = p_key.decode('utf-8')
             if p_key == target_pub_key_str: return pid
         return None
+
+    def stop(self):
+        with self._lock:
+            for evt in self.pending_events.values():
+                evt.set()
+            self.pending_events.clear()
+            self.pending_results.clear()

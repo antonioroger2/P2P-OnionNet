@@ -27,6 +27,7 @@ class RelayService:
             try:
                 self.sock.bind((bind_ip, port))
                 self.sock.listen(5)
+                self.sock.settimeout(1.0)
                 return port
             except OSError:
                 continue
@@ -40,8 +41,17 @@ class RelayService:
             try:
                 conn, addr = self.sock.accept()
                 threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+            except socket.timeout:
+                continue
             except:
                 break
+
+    def stop(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
 
     def _handle(self, conn):
         try:

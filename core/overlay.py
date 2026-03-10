@@ -15,6 +15,7 @@ from modules.http_proxy import ProxyModule
 class OnionNode:
     def __init__(self, bind_ip='0.0.0.0'):
         self.bind_ip = bind_ip
+        self._shutdown = False
         
 
         self.private_key, self.pub_key = self._load_or_generate_keys()
@@ -34,6 +35,26 @@ class OnionNode:
             "torrent": TorrentModule(self),
             "proxy": ProxyModule(self)
         }
+
+    def shutdown(self):
+        if self._shutdown:
+            return
+        self._shutdown = True
+
+        try:
+            self.modules["proxy"].stop()
+        except Exception:
+            pass
+
+        try:
+            self.discovery.stop()
+        except Exception:
+            pass
+
+        try:
+            self.relay.stop()
+        except Exception:
+            pass
 
     def _load_or_generate_keys(self):
         """Loads existing RSA keys or generates and saves new ones."""

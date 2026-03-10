@@ -21,6 +21,7 @@ class DiscoveryService(threading.Thread):
         self.running = True
         self.discovery_port = 0  # Will be assigned dynamically by OS
         self.known_hosts = self._load_known_hosts()
+        self.sock = None
         
         # DEV MODE: Auto-reset trust (only when explicitly enabled)
         if os.getenv("DISCOVERY_DEV_MODE") == "1":
@@ -151,6 +152,7 @@ class DiscoveryService(threading.Thread):
         Binds to Port 0 (OS Assigned) to avoid blocks.
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock = s
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         # Windows Compatibility
@@ -164,6 +166,7 @@ class DiscoveryService(threading.Thread):
             # BIND TO PORT 0 -> OS picks a free random port
             s.bind(('', 0))
             self.discovery_port = s.getsockname()[1] # Capture the actual port
+            s.settimeout(1.0)
             print(f"[*] Discovery Service Listening on UDP Port {self.discovery_port}")
         except Exception as e:
             print(f"[CRITICAL] Bind Failed: {e}")
@@ -207,9 +210,21 @@ class DiscoveryService(threading.Thread):
                             if disc_port:
                                 self._send_raw_hello(peer_data['host'], disc_port)
 
+            except socket.timeout:
+                continue
+            except OSError:
+                break
             except Exception as e:
                 print(f"[ERROR] DiscoveryService listen_broadcasts exception: {e}")
                 continue
+
+    def stop(self):
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
 
     def _validate_and_add_peer(self, payload):
         peer_host = payload.get('host')
@@ -220,8 +235,9 @@ class DiscoveryService(threading.Thread):
         if peer_port == self.node.port and peer_host == self.node.get_local_ip():
             return False
 
-        # TOFU: Use host (without port) as the stable identifier
-        trusted_id = peer_host
+        # TOFU: Use host:port as the stable identifier to avoid false MITM blocks
+        # when same host runs multiple instances on different ports
+        trusted_id = peer_id
         
         if trusted_id in self.known_hosts:
             if self.known_hosts[trusted_id] != peer_key:
