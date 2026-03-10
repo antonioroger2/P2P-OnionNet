@@ -1,12 +1,13 @@
 import socket
 import struct
+import os
+from cryptography.hazmat.primitives import serialization
 from core.relay import RelayService
 from core.discovery import DiscoveryService
 from core.circuit import CircuitManager
 from core.protocol import serialize, MSG_ONION
 from core.crypto import generate_rsa_keypair
 
-# Import Modules
 from modules.chat import ChatModule
 from modules.encrypted_torrent import TorrentModule
 from modules.http_proxy import ProxyModule
@@ -14,7 +15,11 @@ from modules.http_proxy import ProxyModule
 class OnionNode:
     def __init__(self, bind_ip='0.0.0.0'):
         self.bind_ip = bind_ip
-        self.private_key, self.pub_key = generate_rsa_keypair()
+        self._shutdown = False
+        
+
+        self.private_key, self.pub_key = self._load_or_generate_keys()
+        
         self.peers = {} 
 
         self.relay = RelayService(self)
@@ -30,6 +35,64 @@ class OnionNode:
             "torrent": TorrentModule(self),
             "proxy": ProxyModule(self)
         }
+
+    def shutdown(self):
+        if self._shutdown:
+            return
+        self._shutdown = True
+
+        try:
+            self.modules["proxy"].stop()
+        except Exception:
+            pass
+
+        try:
+            self.discovery.stop()
+        except Exception:
+            pass
+
+        try:
+            self.relay.stop()
+        except Exception:
+            pass
+
+    def _load_or_generate_keys(self):
+        """Loads existing RSA keys or generates and saves new ones."""
+        key_file = "private_key.pem"
+        
+        if os.path.exists(key_file):
+            try:
+                with open(key_file, "rb") as f:
+                    private_key = serialization.load_pem_private_key(
+                        f.read(), password=None
+                    )
+                public_key = private_key.public_key()
+                pem_public = public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+                print("[IDENTITY] Loaded persistent identity from disk.")
+                return private_key, pem_public
+            except Exception as e:
+                print(f"[ERROR] Failed to load keys ({e}). Generating new ones.")
+        
+        # Generate new keys
+        print("[IDENTITY] Generating new RSA identity...")
+        private_key, pem_public = generate_rsa_keypair()
+        
+        # Save to disk
+        try:
+            with open(key_file, "wb") as f:
+                f.write(private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                ))
+            print("[IDENTITY] Saved new identity to private_key.pem")
+        except Exception as e:
+            print(f"[ERROR] Could not save keys: {e}")
+            
+        return private_key, pem_public
 
     def send_raw(self, host, port, msg_type, payload):
         """TCP send with length prefixing."""
@@ -54,8 +117,6 @@ class OnionNode:
     def get_local_ip(self):
         """
         Determines local IP by connecting to a public DNS server.
-        Note: In networks without internet access or with restrictive firewall rules,
-        this will fail and fall back to '127.0.0.1', which may cause issues in LAN-only deployments.
         """
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:

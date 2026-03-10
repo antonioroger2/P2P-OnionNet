@@ -6,6 +6,15 @@ import struct
 from core.protocol import deserialize, MSG_HELLO, MSG_ONION, MSG_DIRECT
 from core.crypto import hybrid_decrypt
 
+def decode_helper(item):
+    if isinstance(item, dict) and '__bytes__' in item:
+        return base64.b64decode(item['__bytes__'])
+    elif isinstance(item, dict):
+        return {k: decode_helper(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [decode_helper(i) for i in item]
+    return item
+
 class RelayService:
     def __init__(self, node):
         self.node = node
@@ -18,6 +27,7 @@ class RelayService:
             try:
                 self.sock.bind((bind_ip, port))
                 self.sock.listen(5)
+                self.sock.settimeout(1.0)
                 return port
             except OSError:
                 continue
@@ -31,8 +41,17 @@ class RelayService:
             try:
                 conn, addr = self.sock.accept()
                 threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+            except socket.timeout:
+                continue
             except:
                 break
+
+    def stop(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
 
     def _handle(self, conn):
         try:
@@ -92,6 +111,7 @@ class RelayService:
 
             if next_hop is None:
                 final_payload = json.loads(inner_data.decode('utf-8'))
+                final_payload = decode_helper(final_payload)
                 self.node.handle_exit_traffic(final_payload)
             else:
                 host, port = next_hop
