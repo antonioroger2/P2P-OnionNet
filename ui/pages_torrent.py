@@ -38,25 +38,32 @@ def render_torrent(node):
         total_chunks = meta.get('total') or (node.modules['torrent'].pending[f_hash]['total'] if is_pending else 0)
         have_chunks = len(node.modules['torrent'].chunks.get(f_hash, {}))
 
-        icon = "▶️" if status in ["seeding", "downloading"] else "⏸️"
-        status_color = "green" if status == "seeding" else "blue" if status == "downloading" else "red"
+        icon = "▶️" if status in ["seeding", "downloading"] else "⏸️" if status == "paused" else "❌" if status == "no_seed" else "⏹️"
+        status_color = "green" if status == "seeding" else "blue" if status == "downloading" else "orange" if status == "paused" else "red"
 
         name_display = meta.get('name', f"Resolving {f_hash[:8]}...")
 
         with st.expander(f"{icon} {name_display} [:{status_color}[{status.upper()}]]"):
             st.caption(f"Hash: {f_hash}")
 
-            if total_chunks:
+            if status == "no_seed":
+                st.error("No peers have this file. Check if the hash is correct and peers are connected.")
+            elif total_chunks:
                 progress = have_chunks / total_chunks
                 st.progress(progress)
                 st.caption(f"Chunks: {have_chunks}/{total_chunks} ({int(progress*100)}%)")
 
             col1, col2 = st.columns(2)
             with col1:
-                action_text = "Pause" if status in ["downloading", "seeding"] else "Resume"
-                if st.button(action_text, key=f"btn_{f_hash}"):
-                    node.modules['torrent'].toggle_pause(f_hash)
-                    st.rerun()
+                if status == "no_seed":
+                    if st.button("Retry Download", key=f"retry_{f_hash}"):
+                        node.modules['torrent'].request_file(f_hash)
+                        st.rerun()
+                else:
+                    action_text = "Pause" if status in ["downloading", "seeding"] else "Resume"
+                    if st.button(action_text, key=f"btn_{f_hash}"):
+                        node.modules['torrent'].toggle_pause(f_hash)
+                        st.rerun()
 
             with col2:
                 # Save to disk if complete

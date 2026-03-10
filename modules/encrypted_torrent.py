@@ -43,6 +43,10 @@ class TorrentModule:
             self.file_status[f_hash] = "downloading"
 
         self._broadcast_who_has(f_hash)
+        # Start timeout for seed discovery
+        timer = threading.Timer(10.0, self._check_seed_timeout, args=(f_hash,))
+        timer.daemon = True
+        timer.start()
 
     def _broadcast_who_has(self, f_hash):
         my_fp = self.node.pub_key.decode('utf-8')
@@ -71,6 +75,13 @@ class TorrentModule:
                 self.file_status[f_hash] = "stopped"
             elif current == "stopped":
                 self.file_status[f_hash] = "seeding"
+            elif current == "no_seed":
+                # Retry download
+                self.file_status[f_hash] = "downloading"
+                self._broadcast_who_has(f_hash)
+                timer = threading.Timer(10.0, self._check_seed_timeout, args=(f_hash,))
+                timer.daemon = True
+                timer.start()
 
     def receive(self, payload):
         action = payload.get("action")
@@ -92,6 +103,9 @@ class TorrentModule:
 
         elif action == "have":
             f_hash = payload.get('hash')
+            # If was no_seed, now we found peers
+            if self.file_status.get(f_hash) == "no_seed":
+                self.file_status[f_hash] = "downloading"
             # Ignore if paused
             if self.file_status.get(f_hash) != "downloading": return
 
@@ -215,9 +229,13 @@ class TorrentModule:
         keys = [k for k in self._retry_timers if k[0] == f_hash]
         for k in keys: self._cancel_timer(*k)
 
-    def _find_peer_by_key(self, target_pub_key_str):
-        for pid, meta in self.node.peers.items():
-            p_key = meta.get('pub_key')
-            if isinstance(p_key, bytes): p_key = p_key.decode('utf-8')
-            if p_key == target_pub_key_str: return pid
-        return None
+    def _check_seed_timeout(self, f_hash):
+        with self.lock:
+            if f_hash not in self.pending:
+                return
+            entry = self.pending[f_hash]
+            if entry['peers']:
+                return  # Peers found, continue
+            # No peers responded, mark as no seed
+            self.file_status[f_hash] = "no_seed"
+            print(f"[TORRENT] No seed found for {f_hash}, stopping download.")
